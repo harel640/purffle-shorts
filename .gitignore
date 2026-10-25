@@ -5,8 +5,12 @@
 credentials.json
 client_secret*.json
 token.json
+token*.json
 token.pickle
 *.pickle
+*.pem
+*.key
+*.p12
 
 # Python
 __pycache__/

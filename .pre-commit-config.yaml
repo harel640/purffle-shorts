@@ -1,0 +1,11 @@
+# Pre-commit hooks for PurffleShorts.
+# One-time setup in a clone:   pip install pre-commit && pre-commit install
+# Scan everything on demand:   pre-commit run --all-files
+#
+# The gitleaks hook blocks any commit that would introduce a secret (API keys,
+# OAuth/Studio tokens, passwords, credential files). See CLAUDE.md.
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
