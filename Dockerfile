@@ -19,8 +19,15 @@ COPY pyproject.toml README.md LICENSE ./
 COPY purffle_shorts ./purffle_shorts
 RUN pip install --no-cache-dir .
 
+# Run as an unprivileged user. /work holds the generated videos, the data dir and the
+# OAuth token at runtime (mount a host folder over it), so it must be writable by appuser.
+RUN useradd --create-home --uid 10001 appuser \
+ && mkdir -p /work \
+ && chown -R appuser:appuser /app /work
+
 EXPOSE 8765
 
 WORKDIR /work
+USER appuser
 ENTRYPOINT ["purffle-shorts"]
 CMD ["run"]
