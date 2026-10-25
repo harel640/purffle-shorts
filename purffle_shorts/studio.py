@@ -661,7 +661,28 @@ def _handler(app: StudioServer, bound_host: str, password: str | None = None):
     return H
 
 
+_PLACEHOLDER_STUDIO_TOKENS = {"", "change-me", "changeme", "change_me"}
+
+
+def _require_studio_token() -> str:
+    """The Studio exposes a write API, so it refuses to start without a real STUDIO_TOKEN.
+
+    The token must come from the environment; a missing, empty or placeholder value
+    aborts startup with a clear message. Returns the validated token (StudioServer
+    reads the same value from the environment when it builds the server)."""
+    token = os.getenv("STUDIO_TOKEN", "").strip()
+    if token.lower() in _PLACEHOLDER_STUDIO_TOKENS:
+        raise SystemExit(
+            "STUDIO_TOKEN is not set to a real value — the Studio will not start.\n"
+            "Its REST API must not be left unprotected. Generate a strong token:\n"
+            "    python -c \"import secrets; print(secrets.token_urlsafe(32))\"\n"
+            "then set it in your environment (e.g. STUDIO_TOKEN=... in .env) and start the Studio again."
+        )
+    return token
+
+
 def serve(settings: Settings, host: str = "127.0.0.1", port: int = 8765, open_browser: bool = True) -> None:
+    _require_studio_token()
     app = StudioServer(settings)
     httpd = ThreadingHTTPServer((host, port), _handler(app, host))
     url = f"http://{'127.0.0.1' if host in ('0.0.0.0', '::') else host}:{port}/"

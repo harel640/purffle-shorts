@@ -610,8 +610,9 @@ The design is its own: warm paper and ink with one signal colour (a camera's red
 Everything the Studio does is a small JSON API, so n8n, Make, Zapier (through a webhook), a cron job or your own script can make, clip, plan and upload videos:
 
 ```bash
-STUDIO_TOKEN=change-me purffle-shorts studio --no-browser
-curl -X POST localhost:8765/api/make -H "X-Studio-Token: change-me" -H "Content-Type: application/json" \
+export STUDIO_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"   # required; keep it secret
+purffle-shorts studio --no-browser
+curl -X POST localhost:8765/api/make -H "X-Studio-Token: $STUDIO_TOKEN" -H "Content-Type: application/json" \
      -d '{"topic": "why octopuses have three hearts", "style": "facts", "duration": 35}'      # → {"job": 1}
 curl localhost:8765/api/jobs/1          # status, stage, percentage, time left, then the result with the video id
 curl -o short.mp4 localhost:8765/files/12/short.mp4
