@@ -1,14 +1,20 @@
 # Gitleaks configuration for PurffleShorts.
-# Extends the full default ruleset and only allowlists known-safe placeholder files,
-# so value-less examples don't produce false positives that would block commits.
-# Real secrets anywhere else are still caught. See CLAUDE.md.
+# Extends the full default ruleset. The only allowlist matches the *captured secret*
+# value, not a file path: it permits empty values and obvious placeholders (what
+# .env.example is full of) while a real-looking secret — anywhere, including in
+# .env.example — is still reported and blocks the commit. See CLAUDE.md.
 title = "PurffleShorts gitleaks config"
 
 [extend]
 useDefault = true
 
 [allowlist]
-description = "Example/placeholder files that hold variable names only, never real values."
-paths = [
-  '''\.env\.example$''',
+description = "Empty values and obvious placeholders only (real-looking secrets are still blocked)"
+regexTarget = "secret"
+regexes = [
+  # Empty value: a value-less line is captured as the bare VAR_NAME= (note the
+  # required trailing '='), which a real secret value never looks like.
+  '''^[A-Za-z0-9_]+=$''',
+  # Obvious placeholders a human writes instead of a real key.
+  '''(?i)^(your[-_].*|<.*>|change[-_]?me|placeholder.*|replace[-_].*|example.*|todo.*|x{3,}|sk-x{3,}|dummy.*|test[-_]?key.*|changethis.*)$''',
 ]
