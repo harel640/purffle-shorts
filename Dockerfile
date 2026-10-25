@@ -15,9 +15,14 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
+# Install dependencies from the hash-locked requirements only, so the image can never
+# resolve an unpinned version. Then install the package itself without re-resolving
+# dependencies (--no-deps): everything it needs is already pinned above.
+COPY requirements.txt ./
+RUN pip install --no-cache-dir --require-hashes -r requirements.txt
 COPY pyproject.toml README.md LICENSE ./
 COPY purffle_shorts ./purffle_shorts
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir --no-deps .
 
 # Run as an unprivileged user. /work holds the generated videos, the data dir and the
 # OAuth token at runtime (mount a host folder over it), so it must be writable by appuser.
