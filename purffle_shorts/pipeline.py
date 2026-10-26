@@ -326,7 +326,10 @@ class Studio:
             raise
         if standalone:
             self._step("done", script.title)
-        return script, pick, self.llm.label if self.llm else "offline"
+        used = (self.llm.last_used or self.llm.label) if self.llm else "offline"
+        if self.llm is not None:
+            log.info("Video LLM: %s", used)
+        return script, pick, used
 
     # ------------------------------------------------------------------ one video
     def make(self, topic: str | None = None, *, source: str | None = None, upload: bool | None = None,

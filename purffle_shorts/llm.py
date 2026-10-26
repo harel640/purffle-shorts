@@ -352,6 +352,7 @@ class LLM:
 
     def __init__(self, settings: Settings):
         self.settings = settings
+        self.last_used = ""
         primary = resolve_provider_name(settings)
         names = [primary] + [n for n in settings.llm_fallbacks if n != primary]
         # Automatic backup: if a Groq key is set and Groq isn't already in the chain, append it.
@@ -392,6 +393,7 @@ class LLM:
                 return extract_json(text)
             try:
                 result = with_retries(_call, attempts=2, base_delay=3, label=f"LLM {p}")
+                self.last_used = str(p)
                 if p is not self.providers[0]:
                     log.info("Used fallback LLM %s", p)
                 return result
