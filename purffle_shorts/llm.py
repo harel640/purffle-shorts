@@ -335,6 +335,15 @@ def build_provider(name: str, settings: Settings, model: str = "") -> Provider:
     return OpenAICompatible(preset, model, key, base_url)
 
 
+_MODEL_GONE_RE = re.compile(
+    r"(?i)(http 404|not found|no longer available|does not exist|unknown model|model .*\bnot\b)")
+
+
+def _is_model_gone_error(error: Exception) -> bool:
+    """True when the error means the requested model no longer exists (so re-selecting helps)."""
+    return bool(_MODEL_GONE_RE.search(str(error)))
+
+
 class LLM:
     """Primary provider + ordered fallbacks. ``complete_json`` returns a parsed dict."""
 
@@ -361,9 +370,13 @@ class LLM:
     def complete_json(self, system: str, user: str, schema: dict | None = None,
                       max_tokens: int = 4000, temperature: float | None = None) -> dict[str, Any]:
         """``temperature`` overrides LLM_TEMPERATURE for this call (low for grading, where repeatability matters)."""
-        errors = []
+        errors: list[str] = []
         temp = self.settings.llm_temperature if temperature is None else temperature
-        for p in self.providers:
+        providers = list(self.providers)
+        i = 0
+        while i < len(providers):
+            p = providers[i]
+
             def _call(p=p):
                 text = p.complete(system, user, schema=schema if schema is not None else {}, max_tokens=max_tokens,
                                   temperature=temp)
@@ -373,7 +386,31 @@ class LLM:
                 if p is not self.providers[0]:
                     log.info("Used fallback LLM %s", p)
                 return result
-            except Exception as e:  # try the next provider
+            except Exception as e:
+                # Self-heal: the chosen model is gone (404 / "no longer available"). Pick the next
+                # newest model for this provider and retry it once before moving to the next provider.
+                healed = self._reselect_on_model_gone(p, e)
+                if healed is not None:
+                    log.info("%s model '%s' unavailable; retrying with '%s'", p.name, p.model, healed.model)
+                    providers[i] = healed
+                    continue
                 errors.append(f"{p}: {e}")
                 log.warning("LLM %s failed: %s", p, e)
+                i += 1
         raise LLMError("All LLM providers failed:\n  " + "\n  ".join(errors))
+
+    def _reselect_on_model_gone(self, provider: Provider, error: Exception) -> Provider | None:
+        """If ``error`` means the model is gone, rebuild the provider on the next newest model
+        (refreshing the list) and return it, else None. Each model name is tried at most once."""
+        if provider.name not in AUTO_SELECT_PROVIDERS or not _is_model_gone_error(error):
+            return None
+        tried = self.__dict__.setdefault("_tried", {}).setdefault(provider.name, set())
+        tried.add(provider.model)
+        new_model = _auto_model(provider.name, PRESETS[provider.name], self.settings,
+                                exclude=tried, force_refresh=True)
+        if not new_model or new_model in tried:
+            return None
+        try:
+            return build_provider(provider.name, self.settings, new_model)
+        except LLMError:
+            return None
