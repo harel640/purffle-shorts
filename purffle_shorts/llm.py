@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .config import Settings
-from .utils import PermanentError, http, raise_for_status, with_retries
+from .utils import PermanentError, http, raise_for_status, redact, with_retries
 
 log = logging.getLogger("purffle")
 
@@ -280,9 +280,38 @@ class AnthropicProvider(Provider):
         return text
 
 
+AUTO_SELECT_PROVIDERS = {"gemini"}
+
+
+def _auto_model(name: str, preset: Preset, settings: Settings, *, exclude=frozenset(),
+                force_refresh: bool = False) -> str:
+    """Newest suitable model for an auto-select provider, or '' to fall back to the preset
+    default. Runs only when a key is present, so the no-key paths make no network call."""
+    key = _key_for(preset, settings)
+    if not key:
+        return ""
+    cache_dir = os.path.join(settings.data_dir or "data", "cache")
+    try:
+        from . import model_select
+        if name == "gemini":
+            model = model_select.select_gemini_model(key, cache_dir, exclude=set(exclude),
+                                                      force_refresh=force_refresh)
+        else:
+            return ""
+        if model:
+            log.info("Auto-selected %s model: %s", name, model)
+            return model
+        log.warning("Could not auto-select a %s model; using default %s", name, preset.default_model)
+    except Exception as e:  # never fatal: fall back to the default; self-heal handles a dead default
+        log.warning("Auto-select for %s failed (%s); using default %s", name, redact(e), preset.default_model)
+    return ""
+
+
 def build_provider(name: str, settings: Settings, model: str = "") -> Provider:
     preset = PRESETS[name]
     chosen = model
+    if not model and name in AUTO_SELECT_PROVIDERS:
+        model = _auto_model(name, preset, settings)
     model = model or preset.default_model
     key = _key_for(preset, settings)
     if preset.kind == "anthropic":
