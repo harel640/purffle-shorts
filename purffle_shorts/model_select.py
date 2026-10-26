@@ -103,3 +103,44 @@ def select_gemini_model(api_key: str, cache_dir: str, *, exclude: set[str] = fro
     if model and not exclude:
         write_cache(cache_dir, "gemini", model)
     return model
+
+
+# --------------------------------------------------------------------------- Groq
+# Groq hosts more than chat models; skip the ones that cannot write a script.
+_GROQ_SKIP = ("whisper", "tts", "guard", "embed", "prompt-guard", "-vision", "allam", "distil", "moderation")
+
+
+def list_groq_models(api_key: str) -> list[dict]:
+    r = http().get("https://api.groq.com/openai/v1/models",
+                   headers={"Authorization": f"Bearer {api_key}"}, timeout=30)
+    raise_for_status(r, "Groq ListModels")
+    return r.json().get("data", [])
+
+
+def choose_groq_model(api_key: str, *, exclude: set[str] = frozenset()) -> str:
+    """Newest active, stable Groq chat model, or ''. 'Newest' = highest release date
+    (the API's ``created`` timestamp), then version number."""
+    cands: list[tuple[tuple[float, tuple[int, ...]], str]] = []
+    for m in list_groq_models(api_key):
+        mid = m.get("id") or ""
+        low = mid.lower()
+        if not mid or mid in exclude or m.get("active") is False:
+            continue
+        if any(tok in low for tok in _GROQ_SKIP) or not is_stable(mid):
+            continue
+        cands.append(((float(m.get("created") or 0), version_key(mid)), mid))
+    cands.sort(reverse=True)
+    return cands[0][1] if cands else ""
+
+
+def select_groq_model(api_key: str, cache_dir: str, *, exclude: set[str] = frozenset(),
+                      force_refresh: bool = False) -> str:
+    """Cached newest-stable Groq chat model. Returns '' if the list can't be fetched."""
+    if not force_refresh and not exclude:
+        cached = read_cache(cache_dir, "groq", exclude=set(exclude))
+        if cached:
+            return cached
+    model = choose_groq_model(api_key, exclude=set(exclude))
+    if model and not exclude:
+        write_cache(cache_dir, "groq", model)
+    return model

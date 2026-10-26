@@ -280,7 +280,7 @@ class AnthropicProvider(Provider):
         return text
 
 
-AUTO_SELECT_PROVIDERS = {"gemini"}
+AUTO_SELECT_PROVIDERS = {"gemini", "groq"}
 
 
 def _auto_model(name: str, preset: Preset, settings: Settings, *, exclude=frozenset(),
@@ -296,6 +296,9 @@ def _auto_model(name: str, preset: Preset, settings: Settings, *, exclude=frozen
         if name == "gemini":
             model = model_select.select_gemini_model(key, cache_dir, exclude=set(exclude),
                                                       force_refresh=force_refresh)
+        elif name == "groq":
+            model = model_select.select_groq_model(key, cache_dir, exclude=set(exclude),
+                                                    force_refresh=force_refresh)
         else:
             return ""
         if model:
@@ -351,6 +354,12 @@ class LLM:
         self.settings = settings
         primary = resolve_provider_name(settings)
         names = [primary] + [n for n in settings.llm_fallbacks if n != primary]
+        # Automatic backup: if a Groq key is set and Groq isn't already in the chain, append it.
+        if "groq" not in names and _key_for(PRESETS["groq"], settings):
+            names.append("groq")
+            log.info("Groq backup enabled (GROQ_API_KEY set)")
+        elif "groq" not in names:
+            log.debug("No Groq backup; set GROQ_API_KEY to add an automatic fallback")
         self.providers: list[Provider] = []
         for n in names:
             if n not in PRESETS:
