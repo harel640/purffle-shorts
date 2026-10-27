@@ -42,6 +42,18 @@ def test_choose_gemini_excludes_tried(monkeypatch):
     assert M.choose_gemini_model("k", exclude={"gemini-3.8-flash"}) == "gemini-2.5-flash"
 
 
+def test_gemini_skips_non_text_flash_variants(monkeypatch):
+    # tts/image/etc. report generateContent but are the wrong output modality for a script;
+    # the plain flash model must win even though it ties on version.
+    models = [
+        {"name": "models/gemini-3.8-flash", "supportedGenerationMethods": ["generateContent"]},
+        {"name": "models/gemini-3.8-flash-tts", "supportedGenerationMethods": ["generateContent"]},
+        {"name": "models/gemini-3.8-flash-image", "supportedGenerationMethods": ["generateContent"]},
+    ]
+    monkeypatch.setattr(M, "list_gemini_models", lambda key: models)
+    assert M.choose_gemini_model("k") == "gemini-3.8-flash"
+
+
 def test_select_gemini_caches_then_refreshes(tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(M, "list_gemini_models", lambda key: calls.append(1) or GEMINI_LIST)

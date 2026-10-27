@@ -75,21 +75,33 @@ def list_gemini_models(api_key: str) -> list[dict]:
     return r.json().get("models", [])
 
 
+# Flash models that do not write text (wrong output modality): skip them in auto-select,
+# even though they report generateContent.
+_GEMINI_NON_TEXT = ("tts", "image", "audio", "embedding", "aqa")
+
+
 def choose_gemini_model(api_key: str, *, exclude: set[str] = frozenset()) -> str:
-    """Newest stable 'flash' model that supports generateContent, or '' if none."""
-    cands: list[tuple[tuple[int, ...], str]] = []
+    """Newest stable text 'flash' model that supports generateContent, or '' if none.
+
+    A tie on version prefers the plainer (shorter) name, so 'gemini-3.8-flash' wins over a
+    specialised variant such as 'gemini-3.8-flash-tts'.
+    """
+    cands: list[tuple[tuple[int, ...], int, str]] = []
     for m in list_gemini_models(api_key):
         name = (m.get("name") or "").split("/")[-1]  # "models/gemini-3.8-flash" -> "gemini-3.8-flash"
+        low = name.lower()
         if not name or name in exclude:
             continue
         methods = m.get("supportedGenerationMethods") or m.get("supportedActions") or []
         if "generateContent" not in methods:
             continue
-        if "flash" not in name.lower() or not is_stable(name):
+        if "flash" not in low or not is_stable(name):
             continue
-        cands.append((version_key(name), name))
+        if any(tok in low for tok in _GEMINI_NON_TEXT):
+            continue
+        cands.append((version_key(name), -len(name), name))
     cands.sort(reverse=True)
-    return cands[0][1] if cands else ""
+    return cands[0][2] if cands else ""
 
 
 def select_gemini_model(api_key: str, cache_dir: str, *, exclude: set[str] = frozenset(),
