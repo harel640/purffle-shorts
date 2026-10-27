@@ -122,6 +122,8 @@ class Settings:
     script_target_score: int = 80     # stop improving once a script scores this (0-100)
     learn_from_stats: bool = False    # show the LLM which of your videos got the most / fewest views
     seo_keywords: bool = True         # hand the script writer what people really search for on YouTube
+    safety_filter: bool = True        # skip destinations under a do-not-travel / reconsider-travel advisory
+    fact_check: bool = True           # second LLM pass that strips unsupported numbers/claims
 
     # --- voice ----------------------------------------------------------------------------
     tts_engine: str = "edge"          # edge|openai|elevenlabs|kokoro|coqui|system|silent
@@ -300,6 +302,8 @@ class Settings:
             script_target_score=max(0, min(100, _int("SCRIPT_TARGET_SCORE", d.script_target_score))),
             learn_from_stats=_bool(_env("LEARN_FROM_STATS", "false")),
             seo_keywords=_bool(_env("SEO_KEYWORDS", "true")),
+            safety_filter=_bool(_env("SAFETY_FILTER", "true")),
+            fact_check=_bool(_env("FACT_CHECK", "true")),
             tts_engine=_env("TTS_ENGINE", d.tts_engine).lower(),
             tts_voice=_env("TTS_VOICE"),
             tts_voice_b=_env("TTS_VOICE_B"),

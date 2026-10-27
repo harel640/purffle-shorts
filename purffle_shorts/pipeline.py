@@ -20,6 +20,7 @@ from . import analytics, crosspost, ffmpeg, notify, seo, sfx, topics, tts, youtu
 from .config import Settings
 from .history import History, now_iso
 from .llm import LLM, LLMConfigError
+from . import factcheck, safety
 from .media import MediaItem, Visuals, background_item
 from .overlays import EMOJI_CREDIT, ChatMessage, build_overlays
 from .render import pick_cover, render_video, split_sizes
@@ -302,6 +303,10 @@ class Studio:
             pick.subject = f"{topic} (source: {pick.subject})"
         log.info("Topic [%s]: %s", pick.source, pick.subject)
         try:
+            if self.llm is not None and not s.offline and s.safety_filter:
+                verdict = safety.check(pick.subject, self.llm)
+                if verdict.unsafe:
+                    raise safety.UnsafeTopic(verdict.reason)
             self._step("script", pick.subject)
             insights = analytics.insights(self.history) if s.learn_from_stats else ""
             style = style or pick.style or None
@@ -320,6 +325,8 @@ class Studio:
             if self.llm is not None and s.script_review != "off":
                 self._step("review", "Script Doctor")
                 script = review_script(self.llm, script, s)
+            if self.llm is not None and not s.offline and s.fact_check:
+                script = factcheck.scrub(self.llm, script, s)
         except BaseException:
             if pick.idea_id:
                 self.history.release_idea(pick.idea_id)
@@ -365,6 +372,10 @@ class Studio:
                 shutil.rmtree(state["folder"], ignore_errors=True)  # nothing usable was made
             log.info("Stopped: the job was cancelled")
             raise
+        except safety.UnsafeTopic as e:
+            log.warning("Skipped (travel advisory): %s", redact(e))
+            return Result(False, folder=state.get("folder"), status="skipped", error=str(e),
+                          seconds=time.time() - t0)
         except Exception as e:
             if pick is not None and pick.idea_id and not state.get("record_id"):
                 self.history.release_idea(pick.idea_id)
