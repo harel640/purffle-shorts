@@ -129,10 +129,21 @@ def list_groq_models(api_key: str) -> list[dict]:
     return r.json().get("data", [])
 
 
+# Groq model families that reliably honour JSON / structured output (what the script
+# pipeline needs). Preferred over others; some models (e.g. some Qwen builds on Groq)
+# reject the strict JSON and fail the whole call, so they are only a last resort.
+_GROQ_JSON_PREFERRED = ("llama-4", "llama-3.3", "llama-3.1", "llama3", "gpt-oss")
+
+
 def choose_groq_model(api_key: str, *, exclude: set[str] = frozenset()) -> str:
-    """Newest active, stable Groq chat model, or ''. 'Newest' = highest release date
-    (the API's ``created`` timestamp), then version number."""
-    cands: list[tuple[tuple[float, tuple[int, ...]], str]] = []
+    """Newest active, stable Groq chat model that reliably returns JSON, or ''.
+
+    'Newest' = highest release date (the API's ``created`` timestamp), then version.
+    A JSON-reliable family is always preferred over a newer model from another family,
+    because the backup has to produce the pipeline's structured output unattended.
+    """
+    preferred: list[tuple[tuple[float, tuple[int, ...]], str]] = []
+    others: list[tuple[tuple[float, tuple[int, ...]], str]] = []
     for m in list_groq_models(api_key):
         mid = m.get("id") or ""
         low = mid.lower()
@@ -140,9 +151,11 @@ def choose_groq_model(api_key: str, *, exclude: set[str] = frozenset()) -> str:
             continue
         if any(tok in low for tok in _GROQ_SKIP) or not is_stable(mid):
             continue
-        cands.append(((float(m.get("created") or 0), version_key(mid)), mid))
-    cands.sort(reverse=True)
-    return cands[0][1] if cands else ""
+        entry = ((float(m.get("created") or 0), version_key(mid)), mid)
+        (preferred if any(tok in low for tok in _GROQ_JSON_PREFERRED) else others).append(entry)
+    pool = preferred or others
+    pool.sort(reverse=True)
+    return pool[0][1] if pool else ""
 
 
 def select_groq_model(api_key: str, cache_dir: str, *, exclude: set[str] = frozenset(),

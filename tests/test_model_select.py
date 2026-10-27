@@ -88,6 +88,22 @@ def test_choose_groq_picks_newest_active_chat(monkeypatch):
     assert M.choose_groq_model("k") == "llama-3.3-70b-versatile"
 
 
+def test_groq_prefers_json_capable_over_newer_other(monkeypatch):
+    # A newer model from a JSON-flaky family must not be chosen over a JSON-reliable one.
+    models = [
+        {"id": "qwen/qwen3.8-27b", "active": True, "created": 999},        # newest, but JSON-flaky
+        {"id": "llama-3.3-70b-versatile", "active": True, "created": 200},  # JSON-reliable family
+    ]
+    monkeypatch.setattr(M, "list_groq_models", lambda key: models)
+    assert M.choose_groq_model("k") == "llama-3.3-70b-versatile"
+
+
+def test_groq_falls_back_to_other_family_when_no_preferred(monkeypatch):
+    models = [{"id": "qwen/qwen3.8-27b", "active": True, "created": 999}]
+    monkeypatch.setattr(M, "list_groq_models", lambda key: models)
+    assert M.choose_groq_model("k") == "qwen/qwen3.8-27b"
+
+
 # --------------------------------------------------------------- build_provider
 def test_build_provider_auto_selects_gemini(tmp_path, monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "k")
