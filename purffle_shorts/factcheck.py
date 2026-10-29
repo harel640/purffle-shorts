@@ -29,15 +29,17 @@ def _prune_emphasis(scene) -> None:
 def scrub(llm, script, settings):
     """Rewrite any line with unsupported specifics. Mutates and returns the same Script."""
     lines = [{"id": i, "text": sc.narration} for i, sc in enumerate(script.scenes)]
-    payload = {"title": script.title, "hook": script.hook_text, "lines": lines}
+    payload = {"title": script.title, "hook": script.hook_text, "description": script.description,
+               "tags": list(script.tags), "hashtags": list(script.hashtags), "lines": lines}
     user = (
-        "Check the title, hook and each line below. If one states a specific statistic, percentage, count, "
-        "date, ranking or superlative that is NOT well-established common knowledge and that you cannot "
-        "confidently support, rewrite it to remove the unsupported specifics while keeping it engaging and "
-        'TRUE (e.g. "85% of X" -> "most X", "2,300 temples" -> "thousands of temples", "the oldest" -> '
-        '"one of the oldest"). NEVER invent a new number. Leave well-supported text unchanged.\n'
-        'Return STRICT JSON {"title": "<kept or fixed>", "hook": "<kept or fixed>", '
-        '"lines": [{"id": <int>, "text": "<kept or fixed>"}], "flagged": ["<what you changed and why>"]}.\n'
+        "Check the title, hook, description, tags, hashtags and each line below. If any states a specific "
+        "statistic, percentage, count, date, ranking or superlative that is NOT well-established common "
+        "knowledge and that you cannot confidently support, rewrite it to remove the unsupported specifics "
+        'while keeping it engaging and TRUE (e.g. "85% of X" -> "most X", "built in the 1500s" -> "built '
+        'centuries ago", "the oldest" -> "one of the oldest"). NEVER invent a new number. Drop a tag or '
+        "hashtag rather than keep a false one. Leave well-supported text unchanged.\n"
+        'Return STRICT JSON {"title": "...", "hook": "...", "description": "...", "tags": ["..."], '
+        '"hashtags": ["..."], "lines": [{"id": <int>, "text": "..."}], "flagged": ["<what changed and why>"]}.\n'
         + json.dumps(payload, ensure_ascii=False)
     )
     try:
@@ -72,6 +74,17 @@ def scrub(llm, script, settings):
             sc.narration = new
             _prune_emphasis(sc)
             changes += 1
+
+    new_desc = str(data.get("description", "")).strip()
+    if new_desc and new_desc != script.description:
+        script.description = new_desc
+        changes += 1
+    for field in ("tags", "hashtags"):
+        if isinstance(data.get(field), list):
+            cleaned = [str(t).strip() for t in data[field] if str(t).strip()]
+            if cleaned and cleaned != getattr(script, field):
+                setattr(script, field, cleaned)
+                changes += 1
 
     flagged = [str(f) for f in (data.get("flagged") or [])][:8]
     if changes:

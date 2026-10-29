@@ -1,6 +1,9 @@
-"""Tests for the Maker guardrails: travel-safety filter and the fact-check pass (no network)."""
+"""Tests for the Maker guardrails: safety filter, channel guard and the fact-check pass (no network)."""
 
-from purffle_shorts import factcheck, safety
+import pytest
+
+from purffle_shorts import factcheck, safety, youtube
+from purffle_shorts.config import Settings
 from purffle_shorts.script import Scene, Script
 
 
@@ -66,7 +69,8 @@ def _script():
             Scene(narration="Bagan has exactly 2,300 temples.", search_query="bagan", emphasis=["2,300"]),
             Scene(narration="Most are peaceful at dawn.", search_query="dawn", emphasis=[]),
         ],
-        description="",
+        description="Built in the 1500s, Bagan has 2,300 temples.",
+        tags=["bagan", "2300 temples"],
     )
 
 
@@ -74,16 +78,21 @@ def test_factcheck_rewrites_unsupported_stats():
     reply = {
         "title": "Most temples are hidden",
         "hook": "Most of Bagan's temples are never seen",
+        "description": "Built centuries ago, Bagan has thousands of temples.",
+        "tags": ["bagan", "temples"],
+        "hashtags": [],
         "lines": [
             {"id": 0, "text": "Bagan has thousands of temples."},
             {"id": 1, "text": "Most are peaceful at dawn."},
         ],
-        "flagged": ["removed 2,300 and 85%"],
+        "flagged": ["removed 2,300, 85% and the 1500s date"],
     }
     out = factcheck.scrub(FakeLLM(reply), _script(), settings=None)
     assert "thousands" in out.scenes[0].narration and "2,300" not in out.scenes[0].narration
     assert out.scenes[0].emphasis == []          # "2,300" pruned — no longer in the line
     assert "85%" not in out.title and "85%" not in out.hook_text
+    assert "1500s" not in out.description and "centuries" in out.description   # metadata fact-checked too
+    assert out.tags == ["bagan", "temples"]
 
 
 def test_factcheck_fails_open_on_error():
@@ -91,3 +100,46 @@ def test_factcheck_fails_open_on_error():
     before = sc.scenes[0].narration
     out = factcheck.scrub(FakeLLM(RuntimeError("boom")), sc, settings=None)
     assert out.scenes[0].narration == before     # unchanged on LLM error
+
+
+# --------------------------------------------------------------- channel guard
+class FakeYT:
+    """Stand-in for the YouTube API client: yt.channels().list(...).execute()."""
+    def __init__(self, items):
+        self._items = items
+
+    def channels(self):
+        return self
+
+    def list(self, **kwargs):
+        return self
+
+    def execute(self):
+        return {"items": self._items}
+
+
+def _channel(title, handle):
+    return [{"id": "UC_test_123", "snippet": {"title": title, "customUrl": handle}}]
+
+
+def test_channel_guard_allows_matching_handle():
+    yt = FakeYT(_channel("Asia Unseen", "@asiaunseen-au"))   # Google returns the handle lower-cased
+    ident = youtube.verify_channel(Settings(require_channel="@AsiaUnseen-AU"), yt)
+    assert ident["title"] == "Asia Unseen"
+
+
+def test_channel_guard_blocks_wrong_channel():
+    yt = FakeYT(_channel("Someone Else", "@someoneelse"))
+    with pytest.raises(youtube.ChannelMismatch):
+        youtube.verify_channel(Settings(require_channel="@AsiaUnseen-AU"), yt)
+
+
+def test_channel_guard_blocks_when_no_channel():
+    with pytest.raises(youtube.ChannelMismatch):
+        youtube.verify_channel(Settings(require_channel="@AsiaUnseen-AU"), FakeYT([]))
+
+
+def test_channel_guard_matches_by_title_fallback():
+    yt = FakeYT(_channel("Asia Unseen", ""))   # no handle set -> fall back to title match
+    ident = youtube.verify_channel(Settings(require_channel="Asia Unseen"), yt)
+    assert ident["id"] == "UC_test_123"

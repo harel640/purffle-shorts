@@ -200,6 +200,8 @@ class Settings:
     instagram_api_version: str = "v25.0"
     client_secrets: str = "credentials.json"
     token_file: str = "token.json"
+    require_channel: str = ""          # if set (e.g. @AsiaUnseen-AU), uploads are blocked unless the
+    #                                   authorized channel matches it (needs the youtube.readonly scope)
     keep_videos: bool = False
     credit_footage: bool = True
     youtube_api_key: str = ""         # optional, only for reading view counts (learn_from_stats)
@@ -372,6 +374,7 @@ class Settings:
             instagram_api_version=_env("INSTAGRAM_API_VERSION", d.instagram_api_version),
             client_secrets=_env("GOOGLE_CLIENT_SECRETS_FILE", d.client_secrets),
             token_file=_env("YT_TOKEN_FILE", d.token_file),
+            require_channel=_env("REQUIRE_CHANNEL"),
             keep_videos=_bool(_env("KEEP_VIDEOS", "false")),
             credit_footage=_bool(_env("CREDIT_FOOTAGE", "true")),
             batch_size=max(1, _int("BATCH_SIZE", d.batch_size, "SHORTS_BATCH_SIZE")),

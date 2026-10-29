@@ -34,8 +34,13 @@ class NotAuthorized(RuntimeError):
     pass
 
 
+class ChannelMismatch(NotAuthorized):
+    """The authorized token is not for the channel REQUIRE_CHANNEL expects — never upload."""
+
+
 def scopes_for(settings: Settings) -> list[str]:
-    return [SCOPE_UPLOAD] + ([SCOPE_MANAGE] if settings.playlist_id else [])
+    # youtube.readonly lets the channel guard confirm the authorized channel before every upload.
+    return [SCOPE_UPLOAD, SCOPE_READONLY] + ([SCOPE_MANAGE] if settings.playlist_id else [])
 
 
 def auth_scopes(settings: Settings) -> list[str]:
@@ -102,6 +107,35 @@ def service(settings: Settings, interactive: bool = True, extra_scopes: list[str
     from googleapiclient.discovery import build
     creds = get_credentials(settings, interactive, extra_scopes)
     return build("youtube", "v3", credentials=creds, cache_discovery=False)
+
+
+def _norm_handle(s: str) -> str:
+    return (s or "").strip().lstrip("@").lower()
+
+
+def channel_identity(yt) -> dict | None:
+    """{id, title, handle} of the authorized channel, or None. Needs the youtube.readonly scope."""
+    resp = yt.channels().list(part="snippet", mine=True).execute()
+    items = resp.get("items") or []
+    if not items:
+        return None
+    sn = items[0].get("snippet", {}) or {}
+    return {"id": items[0].get("id", ""), "title": sn.get("title", ""), "handle": sn.get("customUrl", "")}
+
+
+def verify_channel(settings: Settings, yt) -> dict:
+    """Return the authorized channel's identity, or raise ChannelMismatch if it isn't
+    settings.require_channel (matched by @handle, or by title as a fallback)."""
+    want = settings.require_channel.strip()
+    ident = channel_identity(yt)
+    if ident is None:
+        raise ChannelMismatch("could not read the authorized channel (re-authorize with the youtube.readonly scope)")
+    ok = (_norm_handle(ident["handle"]) == _norm_handle(want)
+          or ident["title"].strip().lower() == want.lstrip("@").strip().lower())
+    if not ok:
+        raise ChannelMismatch(
+            f"authorized channel is '{ident['title']}' ({ident['handle'] or 'no handle'}), not {want}")
+    return ident
 
 
 def _tz(settings: Settings):
@@ -178,6 +212,17 @@ def upload(settings: Settings, video: Path, body: dict) -> dict:
 
     with _lock:  # one upload at a time; the API client is not thread-safe
         yt = service(settings, interactive=False)
+        if settings.require_channel:
+            try:
+                ident = verify_channel(settings, yt)
+            except ChannelMismatch as e:
+                from . import notify
+                log.error("ALERT: upload blocked by channel guard — %s", e)
+                notify.send(settings, "failed", title="Channel guard blocked upload", detail=str(e))
+                raise
+            log.info("Channel guard OK: uploading to %s (%s)", ident["title"], ident["handle"] or ident["id"])
+        else:
+            log.warning("REQUIRE_CHANNEL is not set — channel guard is OFF (uploading to the default channel)")
         media = MediaFileUpload(str(video), mimetype="video/mp4", chunksize=8 * 1024 * 1024, resumable=True)
         parts = "snippet,status" + (",localizations" if body.get("localizations") else "")
         request = yt.videos().insert(part=parts, body=body, media_body=media)
