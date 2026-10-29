@@ -15,31 +15,46 @@ class FakeLLM:
 
 
 # --------------------------------------------------------------- safety filter
-def test_safety_blocks_high_advisory(monkeypatch):
-    monkeypatch.setattr(safety, "advisory_score", lambda iso2: (4.2, "US State Dept"))
-    v = safety.check("Visit Bagan, Myanmar", FakeLLM({"country": "Myanmar", "iso2": "MM"}))
-    assert v.unsafe and "Myanmar" in v.reason
+FEED = {"burma": 4, "india": 2, "saudi arabia": 3, "thailand": 1}
 
 
-def test_safety_allows_low_advisory(monkeypatch):
-    monkeypatch.setattr(safety, "advisory_score", lambda iso2: (1.8, "src"))
-    v = safety.check("Hampi, India", FakeLLM({"country": "India", "iso2": "IN"}))
-    assert not v.unsafe
+def test_safety_blocks_myanmar(monkeypatch):
+    monkeypatch.setattr(safety, "advisories", lambda: FEED)
+    v = safety.check("Explore Bagan, Myanmar", FakeLLM({"country": "Myanmar", "aliases": ["Burma"]}))
+    assert v.unsafe and v.level == 4 and "burma" in v.country.lower()
+
+
+def test_safety_blocks_reconsider_level3(monkeypatch):
+    monkeypatch.setattr(safety, "advisories", lambda: FEED)
+    v = safety.check("Riyadh desert trip", FakeLLM({"country": "Saudi Arabia", "aliases": []}))
+    assert v.unsafe and v.level == 3
+
+
+def test_safety_allows_india(monkeypatch):
+    monkeypatch.setattr(safety, "advisories", lambda: FEED)
+    v = safety.check("Hampi, India", FakeLLM({"country": "India", "aliases": []}))
+    assert not v.unsafe and v.level == 2
 
 
 def test_safety_ignores_non_country(monkeypatch):
     called = []
-    monkeypatch.setattr(safety, "advisory_score", lambda iso2: called.append(1) or (5.0, "x"))
-    v = safety.check("productivity tips", FakeLLM({"country": "", "iso2": ""}))
-    assert not v.unsafe and called == []  # no advisory lookup for non-destinations
+    monkeypatch.setattr(safety, "advisories", lambda: called.append(1) or FEED)
+    v = safety.check("productivity tips", FakeLLM({"country": "", "aliases": []}))
+    assert not v.unsafe and called == []  # no feed lookup for non-destinations
 
 
-def test_safety_fails_open_on_lookup_error(monkeypatch):
-    def boom(iso2):
-        raise RuntimeError("network down")
-    monkeypatch.setattr(safety, "advisory_score", boom)
-    v = safety.check("Somewhere, Testland", FakeLLM({"country": "Testland", "iso2": "TL"}))
-    assert not v.unsafe  # fail-open so an outage never halts the channel
+def test_safety_fails_closed_when_feed_down(monkeypatch):
+    def boom():
+        raise RuntimeError("feed down")
+    monkeypatch.setattr(safety, "advisories", boom)
+    v = safety.check("Hampi, India", FakeLLM({"country": "India", "aliases": []}))
+    assert v.unsafe and "could not be verified" in v.reason  # fail CLOSED on outage
+
+
+def test_safety_fails_closed_when_country_missing(monkeypatch):
+    monkeypatch.setattr(safety, "advisories", lambda: FEED)
+    v = safety.check("Visit Testlandia", FakeLLM({"country": "Testlandia", "aliases": []}))
+    assert v.unsafe and "could not verify" in v.reason  # unknown country -> skip
 
 
 # --------------------------------------------------------------- fact check
