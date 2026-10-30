@@ -27,6 +27,13 @@ def test_safety_blocks_myanmar(monkeypatch):
     assert v.unsafe and v.level == 4 and "burma" in v.country.lower()
 
 
+def test_safety_blocks_mrauk_u_myanmar(monkeypatch):
+    # The concrete place a video resolves to (Mrauk U is in Myanmar, listed as "Burma" at Level 4).
+    monkeypatch.setattr(safety, "advisories", lambda: FEED)
+    v = safety.check("Mrauk U, Myanmar", FakeLLM({"country": "Myanmar", "aliases": ["Burma"]}))
+    assert v.unsafe and v.level == 4 and "burma" in v.country.lower()
+
+
 def test_safety_blocks_reconsider_level3(monkeypatch):
     monkeypatch.setattr(safety, "advisories", lambda: FEED)
     v = safety.check("Riyadh desert trip", FakeLLM({"country": "Saudi Arabia", "aliases": []}))

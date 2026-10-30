@@ -21,7 +21,7 @@ from .config import Settings
 from .history import History, now_iso
 from .llm import LLM, LLMConfigError
 from . import factcheck, safety
-from .media import MediaItem, Visuals, background_item
+from .media import MediaItem, SkipTopic, Visuals, background_item, resolve_place
 from .overlays import EMOJI_CREDIT, ChatMessage, build_overlays
 from .render import pick_cover, render_video, split_sizes
 from .script import (
@@ -143,6 +143,23 @@ def final_title(script: Script, settings: Settings | None = None, text: str | No
     if settings is not None and not settings.vertical:
         return truncate_words(t, 100)  # a 16:9 video is not a Short
     return f"{t} #shorts" if len(t) + 8 <= 100 else truncate_words(t, 100)
+
+
+def image_credits_block(creds: list[dict]) -> str:
+    """Attribution block for Wikimedia images, as CC-BY / CC-BY-SA require (author + license + links)."""
+    seen: set[str] = set()
+    lines: list[str] = []
+    for c in creds or []:
+        key = c.get("page_url") or c.get("title") or ""
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        who, lic = c.get("author") or "Unknown author", c.get("license") or ""
+        tail = " ".join(x for x in (c.get("page_url", ""), c.get("license_url", "")) if x)
+        lines.append(f"- {c.get('title') or 'Image'} - {who} ({lic}) {tail}".strip())
+    if not lines:
+        return ""
+    return "Image credits (Wikimedia Commons, used under their licenses):\n" + "\n".join(lines)
 
 
 def final_description(script: Script, credits: set[str], settings: Settings, text: str | None = None,
@@ -376,6 +393,10 @@ class Studio:
             log.warning("Skipped (travel advisory): %s", redact(e))
             return Result(False, folder=state.get("folder"), status="skipped", error=str(e),
                           seconds=time.time() - t0)
+        except SkipTopic as e:
+            log.warning("Skipped (visuals): %s", redact(e))
+            return Result(False, folder=state.get("folder"), status="skipped", error=str(e),
+                          seconds=time.time() - t0)
         except Exception as e:
             if pick is not None and pick.idea_id and not state.get("record_id"):
                 self.history.release_idea(pick.idea_id)
@@ -403,6 +424,23 @@ class Studio:
         work.mkdir(parents=True, exist_ok=True)
         (folder / "script.json").write_text(json.dumps(script.to_dict(), indent=2, ensure_ascii=False))
         try:
+            # Place-locked visuals (Wikimedia): resolve the real place and, before spending any time,
+            # run the travel-advisory check on that concrete place (not just the generic topic).
+            place = country = ""
+            image_credits: list[dict] = []
+            place_locked = (media_map is None and self.llm is not None and not s.offline
+                            and "wikimedia" in [x.lower() for x in s.visual_sources])
+            if place_locked:
+                place, country = resolve_place(self.llm, script.title, script.topic,
+                                               " ".join(sc.narration for sc in script.scenes[:3]))
+                if not place:
+                    # Fail closed: without the place we can't guarantee place-accurate, attributed visuals.
+                    raise SkipTopic("could not identify the place for place-accurate visuals")
+                log.info("Place: %s", ", ".join(x for x in (place, country) if x))
+                if s.safety_filter:
+                    v = safety.check(", ".join(x for x in (place, country) if x), self.llm)
+                    if v.unsafe:
+                        raise safety.UnsafeTopic(v.reason)
             self._step("voice", f"{s.tts_engine} voice")
             speech = self._speak(script, work, s)
             total = round(speech.duration + END_PAD, 3)
@@ -436,10 +474,15 @@ class Studio:
                 # split layout: the footage fills the top half, so search for the shape of that half
                 visuals = Visuals(replace(s, resolution=split_sizes(s)[0]) if split else s,
                                   self.history.used_media())
-                got = dict(zip(((st.index, st.part) for st in wanted),
-                               visuals.for_scenes(jobs, script.topic, work / "media", progress=self._sub)))
+                if place_locked and place:
+                    scene_media = visuals.for_place_scenes(jobs, place, country, work / "media",
+                                                           progress=self._sub, min_images=s.min_place_images)
+                else:
+                    scene_media = visuals.for_scenes(jobs, script.topic, work / "media", progress=self._sub)
+                got = dict(zip(((st.index, st.part) for st in wanted), scene_media))
                 media = [got.get((st.index, st.part)) or got[(st.index, 0)] for st in shots]
                 credits = visuals.credits
+                image_credits = visuals.image_credits
             by_scene = {(st.index, st.part): m for st, m in zip(shots, media)}
 
             self._step("captions")
@@ -483,7 +526,8 @@ class Studio:
             (folder / "captions.srt").write_text(srt(chunks), encoding="utf-8")
 
             title = final_title(script, s)
-            extra = [EMOJI_CREDIT] if plan.emoji and s.credit_footage else []
+            credit_block = image_credits_block(image_credits) if s.credit_footage else ""
+            extra = ([credit_block] if credit_block else []) + ([EMOJI_CREDIT] if plan.emoji and s.credit_footage else [])
             description = final_description(script, credits, s, extra=extra)
             localizations = {}
             wanted = [x for x in s.localize_metadata if x != s.language]

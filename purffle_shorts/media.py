@@ -10,7 +10,7 @@ import logging
 import random
 import re
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from urllib.parse import quote
 
@@ -22,6 +22,11 @@ log = logging.getLogger("purffle")
 VIDEO_EXT = {".mp4", ".mov", ".m4v", ".webm", ".mkv"}
 IMAGE_EXT = {".jpg", ".jpeg", ".png", ".webp"}
 STOP_WORDS = {"the", "a", "an", "of", "and", "in", "on", "with", "for", "to", "at", "by", "from", "closeup"}
+
+
+class SkipTopic(Exception):
+    """Raised when a topic can't be made credibly, e.g. too few freely-licensed images of the place.
+    Handled like a travel-advisory skip: the autopilot moves on to another topic."""
 
 
 @dataclass
@@ -39,6 +44,10 @@ class MediaItem:
     extra: dict = field(default_factory=dict)
     rank: int = 0                 # position in the search results (the API's own relevance order)
     text: str = ""                # what the provider says is in it: page slug, alt text, tags
+    author: str = ""              # Wikimedia: the file's author/creator, for attribution
+    license: str = ""             # Wikimedia: short license name, e.g. "CC BY-SA 4.0"
+    license_url: str = ""         # Wikimedia: link to the license deed
+    page_url: str = ""            # Wikimedia: the file's Commons description page (the work's URL)
 
     @property
     def key(self) -> str:
@@ -158,6 +167,99 @@ def pixabay_photos(query: str, key: str, orientation: str = "portrait") -> list[
             for rank, h in enumerate(r.json().get("hits", [])) if h.get("largeImageURL")]
 
 
+# ------------------------------------------------------------------------------------------ Wikimedia Commons
+_WIKI_API = "https://commons.wikimedia.org/w/api.php"
+_WIKI_UA = "purffle-shorts/1.0 (Asia Unseen; place-accurate visuals)"
+# Licenses we are NOT allowed to use (anything with NC, ND, or no free license).
+_WIKI_DENY = ("non-commercial", "noncommercial", "-nc", " nc ", "no deriv", "noderiv", "-nd", " nd ",
+              "fair use", "all rights reserved", "unknown", "no license")
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _wiki_license_ok(short: str) -> tuple[bool, str]:
+    """(allowed, clean name) for a Commons LicenseShortName. Allow public domain / CC0 / CC-BY / CC-BY-SA only."""
+    short = (short or "").strip()
+    if not short:
+        return False, ""
+    s = f" {short.lower()} "
+    if any(d in s for d in _WIKI_DENY):
+        return False, ""
+    flat = s.replace(" ", "")
+    if "cc0" in flat or "publicdomain" in flat or "pdm" in flat or flat.strip("-").startswith("pd"):
+        return True, short or "Public domain"
+    if "cc-by-sa" in flat or "ccbysa" in flat or "by-sa" in flat:
+        return True, short
+    if "cc-by" in flat or "ccby" in flat or " by " in s:
+        return True, short
+    return False, ""
+
+
+def _wiki_author(artist_html: str) -> str:
+    txt = _TAG_RE.sub(" ", artist_html or "").replace("&amp;", "&")
+    txt = re.sub(r"\s+", " ", txt).strip(" ,;")
+    return txt[:120] or "Unknown author"
+
+
+def _wiki_title(title: str) -> str:
+    t = re.sub(r"^File:", "", title or "")
+    t = re.sub(r"\.(jpe?g|png|webp|tiff?|gif)$", "", t, flags=re.I)
+    return re.sub(r"[_]+", " ", t).strip() or "Wikimedia image"
+
+
+def wikimedia_images(query: str, limit: int = 20, min_px: int = 800) -> list[MediaItem]:
+    """Freely-licensed (public-domain / CC-BY / CC-BY-SA) photos of ``query`` from Wikimedia Commons.
+    Author and license are captured on each item so the video can credit them as the licenses require."""
+    r = http().get(_WIKI_API, timeout=30, headers={"User-Agent": _WIKI_UA}, params={
+        "action": "query", "format": "json", "formatversion": 2,
+        "generator": "search", "gsrsearch": f"filetype:bitmap {query}", "gsrnamespace": 6,
+        "gsrlimit": limit, "prop": "imageinfo", "iiprop": "url|size|extmetadata", "iiurlwidth": 1600})
+    raise_for_status(r, "Wikimedia Commons search")
+    pages = (r.json().get("query") or {}).get("pages") or []
+    items: list[MediaItem] = []
+    for rank, pg in enumerate(sorted(pages, key=lambda p: p.get("index", 999))):
+        info = (pg.get("imageinfo") or [{}])[0]
+        meta = info.get("extmetadata") or {}
+        ok, lic = _wiki_license_ok((meta.get("LicenseShortName") or {}).get("value", ""))
+        if not ok:
+            continue
+        w, h = int(info.get("width") or 0), int(info.get("height") or 0)
+        if min(w, h) < min_px:
+            continue
+        url = info.get("url") or info.get("thumburl")
+        if not url:
+            continue
+        title = pg.get("title", "")
+        page_url = info.get("descriptionurl") or f"https://commons.wikimedia.org/wiki/{quote(title.replace(' ', '_'))}"
+        author = _wiki_author((meta.get("Artist") or {}).get("value", ""))
+        lic_url = (meta.get("LicenseUrl") or {}).get("value", "")
+        obj = _TAG_RE.sub(" ", (meta.get("ObjectName") or {}).get("value", "") or "")
+        cats = (meta.get("Categories") or {}).get("value", "")
+        items.append(MediaItem("wikimedia", str(pg.get("pageid") or title), "image", url=url, width=w, height=h,
+                               credit=author, author=author, license=lic, license_url=lic_url, page_url=page_url,
+                               query=query, rank=rank, text=f"{title} {obj} {cats}".strip(),
+                               extra={"wiki_title": _wiki_title(title)}))
+    return items
+
+
+def resolve_place(llm, title: str, topic: str, sample: str = "") -> tuple[str, str]:
+    """Best-effort (place, country) the video is actually about — for place-accurate visuals and the
+    per-place travel-advisory check. Returns ("", "") when there is no single real place."""
+    if llm is None:
+        return "", ""
+    system = "You extract the single real-world place a travel video is about. Reply only with strict JSON."
+    user = ('Return STRICT JSON {"place": "<most specific real place/landmark/city, or empty>", '
+            '"country": "<country, or empty>"}. If there is no single real place, use empty strings.\n'
+            f'Title: {title}\nTopic: {topic}\nFirst lines: {sample[:600]}')
+    try:
+        d = llm.complete_json(system, user, max_tokens=120, temperature=0.0)
+    except Exception as e:
+        log.warning("Place resolve failed (%s)", redact(e))
+        return "", ""
+    if not isinstance(d, dict):
+        return "", ""
+    return str(d.get("place", "")).strip(), str(d.get("country", "")).strip()
+
+
 # ------------------------------------------------------------------------------------------ AI images
 def openai_image(prompt: str, dest: Path, key: str, model: str, orientation: str = "portrait") -> Path:
     body = {"model": model, "prompt": prompt, "n": 1}
@@ -274,6 +376,8 @@ class Visuals:
         if settings.offline:
             self.sources = ["local"]
         self.credits: set[str] = set()
+        self.image_credits: list[dict] = []          # per Wikimedia image: title, author, license, urls
+        self._wiki_cache: dict[str, list[MediaItem]] = {}
 
     # -- search per source (cached per query) --
     def _search(self, source: str, query: str) -> list[MediaItem]:
@@ -297,6 +401,8 @@ class Visuals:
                          or pixabay_photos(query, s.pixabay_api_key, orientation=o))
             elif source == "pixabay-photos" and s.pixabay_api_key:
                 items = pixabay_photos(query, s.pixabay_api_key, orientation=o)
+            elif source == "wikimedia":
+                items = self._wiki_search(query)
             elif source == "local":
                 items = self._local(query)
             seen: set[str] = set()
@@ -381,6 +487,112 @@ class Visuals:
         log.info("Scene %d: %s image", idx + 1, source)
         return MediaItem(source, dest.name, "image", path=dest, width=s.width, height=s.height, query=prompt)
 
+    # -- place-locked sourcing: every clip is a freely-licensed Wikimedia photo of the named place --
+    def _wiki_search(self, query: str) -> list[MediaItem]:
+        q = (query or "").strip()
+        if not q:
+            return []
+        if q.lower() in self._wiki_cache:
+            return self._wiki_cache[q.lower()]
+        try:
+            items = wikimedia_images(q)
+        except Exception as e:
+            log.warning("Wikimedia search for %r failed: %s", q, redact(e))
+            items = []
+        self._wiki_cache[q.lower()] = items
+        return items
+
+    def _claim_wiki(self, cands: list[MediaItem], query: str) -> MediaItem | None:
+        with self.lock:
+            fresh, seen = [], set()
+            for c in cands:
+                if c.key in self.used or c.key in seen:
+                    continue
+                seen.add(c.key)
+                fresh.append(c)
+            if not fresh:
+                return None
+            best = max(fresh, key=lambda c: relevance(c, query) * 3 + 1.0 / (1 + 0.25 * c.rank))
+            self.used.add(best.key)
+            return best
+
+    def _place_stock_video(self, query: str, place: str, country: str, dest_dir: Path, idx: int) -> MediaItem | None:
+        """Stock VIDEO fallback — allowed only when the clip's own metadata names the place (or country)."""
+        tokens = {t for t in re.findall(r"[a-z]+", f"{place} {country}".lower()) if len(t) > 2}
+        if not tokens:
+            return None
+        for source in [x for x in self.sources if x in ("pexels", "pixabay")]:
+            for q in dict.fromkeys([f"{query} {place}".strip(), f"{place} {country}".strip(), place]):
+                for it in self._search(source, q):
+                    if it.kind != "video":
+                        continue
+                    have = set(re.findall(r"[a-z]+", f"{it.text} {it.query}".lower()))
+                    if not (tokens & have):
+                        continue
+                    with self.lock:
+                        if it.key in self.used:
+                            continue
+                        self.used.add(it.key)
+                    try:
+                        self._fetch(it, dest_dir, idx)
+                    except Exception as e:
+                        log.warning("Stock video download failed for %s: %s", it.key, redact(e))
+                        continue
+                    return it
+        return None
+
+    def _record_credit(self, item: MediaItem) -> None:
+        if item.source == "wikimedia":
+            self.credits.add("Wikimedia Commons")
+            self.image_credits.append({"title": item.extra.get("wiki_title") or item.id, "author": item.author,
+                                       "license": item.license, "license_url": item.license_url,
+                                       "page_url": item.page_url})
+        elif item.source.startswith("pexels"):
+            self.credits.add("Pexels")
+        elif item.source.startswith("pixabay"):
+            self.credits.add("Pixabay")
+
+    def for_place_scenes(self, jobs: list[tuple[str, str, float]], place: str, country: str, dest_dir: Path,
+                         progress=None, min_images: int = 5) -> list[MediaItem]:
+        """One Wikimedia image per scene, all of the named place. Raises SkipTopic if the place has fewer than
+        ``min_images`` freely-licensed images. Stock video is used only as a place-named fallback."""
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        pc = ", ".join(x for x in (place, country) if x)
+        pool, seen = [], set()
+        for q in dict.fromkeys([x for x in (pc, place, f"{place} temple", f"{place} landscape") if x]):
+            for it in self._wiki_search(q):
+                if it.key not in seen:
+                    seen.add(it.key)
+                    pool.append(it)
+        log.info("Wikimedia: %d freely-licensed image(s) for %s", len(pool), pc or place)
+        if len(pool) < min_images:
+            raise SkipTopic(f"only {len(pool)} freely-licensed Wikimedia image(s) for '{pc or place}'; "
+                            f"need {min_images}")
+        results: list[MediaItem] = []
+        for i, (q, _prompt, _need) in enumerate(jobs):
+            item = self._claim_wiki(self._wiki_search(f"{q} {place}") + pool, q)
+            if item is not None:
+                try:
+                    self._fetch(item, dest_dir, i)
+                except Exception as e:
+                    log.warning("Wikimedia download failed (%s)", redact(e))
+                    item = None
+            if item is None:                                   # no fresh place image -> place-named stock video
+                item = self._place_stock_video(q, place, country, dest_dir, i)
+            if item is None:                                   # reuse the best place photo, with its own camera move
+                item = replace(max(pool, key=lambda c: relevance(c, q)))
+                try:
+                    self._fetch(item, dest_dir, i)
+                except Exception as e:
+                    log.warning("Wikimedia reuse download failed (%s)", redact(e))
+                    item = MediaItem("generated", f"gradient-{i}", "generated", query=q)
+            self._record_credit(item)
+            log.info("Scene %d: %s %s (%r)", i + 1, item.source, item.kind, q)
+            results.append(item)
+            if progress:
+                progress((i + 1) / len(jobs))
+        return results
+
     def for_scene(self, idx: int, query: str, image_prompt: str, topic: str, need: float, dest_dir: Path) -> MediaItem:
         queries = []
         for q in (query, simplify_query(query), simplify_query(topic), topic):
@@ -403,10 +615,7 @@ class Visuals:
                 except Exception as e:
                     log.warning("Download failed for %s: %s", item.key, redact(e))
                     continue
-                if item.source.startswith("pexels"):
-                    self.credits.add("Pexels")
-                elif item.source.startswith("pixabay"):
-                    self.credits.add("Pixabay")
+                self._record_credit(item)   # always attribute (Wikimedia author+license, or Pexels/Pixabay)
                 log.info("Scene %d: %s %s (%r)", idx + 1, item.source, item.kind, q)
                 return item
         log.info("Scene %d: no footage found for %r — using an animated background", idx + 1, query)

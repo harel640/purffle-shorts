@@ -138,6 +138,7 @@ class Settings:
 
     # --- visuals --------------------------------------------------------------------------
     visual_sources: list[str] = field(default_factory=lambda: ["pexels", "pixabay"])
+    min_place_images: int = 5         # place-locked (wikimedia) mode: skip a topic with fewer matching images
     media_dir: str = "media"
     image_model: str = "gpt-image-1"
     visual_style: str = "cinematic, dramatic lighting, highly detailed, vertical composition"
@@ -316,6 +317,7 @@ class Settings:
             voice_cache=_bool(_env("VOICE_CACHE", "true")),
             whisper_model=_env("WHISPER_MODEL", d.whisper_model),
             visual_sources=[v.lower() for v in _list(_env("VISUAL_SOURCES", "pexels,pixabay"))],
+            min_place_images=_int("MIN_PLACE_IMAGES", d.min_place_images),
             media_dir=_env("MEDIA_DIR", d.media_dir),
             image_model=_env("IMAGE_MODEL", d.image_model),
             visual_style=_env("VISUAL_STYLE", d.visual_style),
