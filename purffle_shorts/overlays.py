@@ -204,7 +204,9 @@ def _parallel(fn, jobs: list) -> None:
 
 
 def display_word(text: str, uppercase: bool) -> str:
-    t = text.strip().strip(",.;:\"“”()[]")
+    # Also strip apostrophes/backticks so a clinging quote never shows ("BATH'" -> "BATH"); internal
+    # apostrophes survive because strip() only touches the ends ("don't" stays "don't").
+    t = text.strip().strip(",.;:\"'`“”‘’‛‟()[]")
     t = t or text.strip()
     return t.upper() if uppercase else t
 

@@ -57,13 +57,12 @@ def _encode_args(settings: Settings, final: bool) -> list[str]:
 
 
 def _image_vf(iw: int, ih: int, W: int, H: int, F: int, frames: int, ken_burns: bool, grade: str) -> str:
-    """Filter to turn one image into a 9:16 segment. A clearly-landscape image (which a cover-crop would
-    slice most of away, cutting the subject) is instead shown whole and centered over a blurred fill of
-    itself, so the subject is never cropped out. Portrait / near-9:16 images are cover-cropped (little is
-    lost). Ken Burns always zooms centered — no horizontal pan that could drift off the subject."""
-    target = W / H
-    src = (iw / ih) if iw and ih else target
-    wide = src > target * 1.5           # cover-crop would keep < ~2/3 of the width -> contain instead
+    """Filter to turn one image into a 9:16 segment. Default is a full-screen cover-crop. Only a true
+    panorama (aspect ratio wider than 2:1), which a cover-crop would slice most of away, is instead shown
+    whole and centered over a blurred fill of itself. Ken Burns always zooms centered — no horizontal pan
+    that could drift off the subject."""
+    src = (iw / ih) if iw and ih else (W / H)
+    wide = src > 2.0                    # only a true panorama (wider than 2:1); everything else cover-crops
     kb = ""
     if ken_burns:
         z = random.choice([f"min(1+0.14*on/{frames},1.14)", f"1.14-0.14*on/{frames}"])  # zoom in or out

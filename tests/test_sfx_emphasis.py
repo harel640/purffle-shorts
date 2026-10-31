@@ -19,6 +19,15 @@ def _samples(path: Path) -> array:
         return array("h", w.readframes(w.getnframes()))
 
 
+def test_burned_caption_word_strips_clinging_quotes():
+    # display_word is exactly what the burn-in captions draw on screen.
+    assert overlays.display_word("BATH'", True) == "BATH"
+    assert overlays.display_word("'LIGHT", True) == "LIGHT"
+    assert overlays.display_word("“wow”", False) == "wow"
+    assert overlays.display_word("don't", True) == "DON'T"      # internal apostrophe kept
+    assert overlays.display_word("`code`", False) == "code"
+
+
 def test_effect_placement():
     ev = sfx.events_for(scene_starts=[2.0, 2.5, 6.0], hook=True)
     assert ev == [(0.05, "hit"), (2.0, "whoosh"), (6.0, "whoosh")]  # 2.5 s is too soon after 2.0 s

@@ -369,6 +369,27 @@ def _score(item: MediaItem, need: float, orientation: str = "portrait", query: s
     return s + random.uniform(0, 0.6)  # a little variety between near-identical candidates
 
 
+# Nature/filler words that, on their own, mean a weak "empty field / plain wall / lone tree" shot.
+_GENERIC_WORDS = {"field", "fields", "grass", "tree", "trees", "wall", "sky", "road", "roads", "meadow",
+                  "lawn", "bush", "bushes", "fence", "cloud", "clouds", "street", "path", "forest", "garden"}
+
+
+def _wiki_rank(item: MediaItem, query: str, script_terms: set[str]) -> float:
+    """Rank a Wikimedia candidate for a scene: relevance to the narration line first, then whether its
+    title names a landmark the script talks about, its resolution, and a portrait/square shape (so a 9:16
+    crop keeps more). A generic shot that names nothing from the script is pushed down."""
+    text_terms = _terms(item.text)
+    s = 4.0 * relevance(item, query)
+    s += min(len(text_terms & script_terms), 3) * 1.2            # title names script landmarks/place
+    res = min(item.width, item.height)
+    s += 1.2 if res >= 1600 else (0.8 if res >= 1000 else (0.3 if res >= 800 else 0.0))
+    if item.height >= item.width:                                # portrait or square -> less cropping
+        s += 1.5
+    if (text_terms & _GENERIC_WORDS) and not (text_terms & script_terms):
+        s -= 2.5                                                 # an empty field / plain wall of nowhere named
+    return s + 0.6 / (1.0 + 0.25 * item.rank)                    # small tiebreak by the API's own order
+
+
 class Visuals:
     def __init__(self, settings: Settings, used_keys: set[str] | None = None):
         self.s = settings
@@ -505,7 +526,7 @@ class Visuals:
         self._wiki_cache[q.lower()] = items
         return items
 
-    def _claim_wiki(self, cands: list[MediaItem], query: str) -> MediaItem | None:
+    def _claim_wiki(self, cands: list[MediaItem], query: str, script_terms: set[str]) -> MediaItem | None:
         with self.lock:
             fresh, seen = [], set()
             for c in cands:
@@ -515,7 +536,7 @@ class Visuals:
                 fresh.append(c)
             if not fresh:
                 return None
-            best = max(fresh, key=lambda c: relevance(c, query) * 3 + 1.0 / (1 + 0.25 * c.rank))
+            best = max(fresh, key=lambda c: _wiki_rank(c, query, script_terms))
             self.used.add(best.key)
             return best
 
@@ -571,9 +592,13 @@ class Visuals:
         if len(pool) < min_images:
             raise SkipTopic(f"only {len(pool)} freely-licensed Wikimedia image(s) for '{pc or place}'; "
                             f"need {min_images}")
+        # Landmarks/place the script talks about: used to prefer images whose titles name them.
+        script_terms = _terms(place) | _terms(country)
+        for q, _p, _n in jobs:
+            script_terms |= _terms(q)
         results: list[MediaItem] = []
         for i, (q, _prompt, _need) in enumerate(jobs):
-            item = self._claim_wiki(self._wiki_search(f"{q} {place}") + pool, q)
+            item = self._claim_wiki(self._wiki_search(f"{q} {place}") + pool, q, script_terms)
             if item is not None:
                 try:
                     self._fetch(item, dest_dir, i)
@@ -583,7 +608,7 @@ class Visuals:
             if item is None:                                   # no fresh place image -> place-named stock video
                 item = self._place_stock_video(q, place, country, dest_dir, i)
             if item is None:                                   # reuse the best place photo, with its own camera move
-                item = replace(max(pool, key=lambda c: relevance(c, q)))
+                item = replace(max(pool, key=lambda c: _wiki_rank(c, q, script_terms)))
                 try:
                     self._fetch(item, dest_dir, i)
                 except Exception as e:

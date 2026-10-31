@@ -93,6 +93,15 @@ def _visuals(settings, monkeypatch, pool):
     return v
 
 
+def test_wiki_rank_prefers_landmark_portrait_highres_over_generic():
+    terms = M._terms("Shittaung Pagoda Mrauk U temple sunrise")
+    landmark = MediaItem("wikimedia", "1", "image", width=1500, height=2000,          # portrait, hi-res, named
+                         text="Shittaung Pagoda Mrauk U", rank=5)
+    generic = MediaItem("wikimedia", "2", "image", width=1600, height=1200,           # landscape, generic
+                        text="green field grass and sky", rank=0)
+    assert M._wiki_rank(landmark, "Shittaung Pagoda", terms) > M._wiki_rank(generic, "Shittaung Pagoda", terms)
+
+
 def test_place_scenes_skips_when_too_few_images(settings, monkeypatch, tmp_path):
     pool = [_wiki_item(i, f"Mrauk U temple {i}") for i in range(3)]        # only 3 < 5
     v = _visuals(settings, monkeypatch, pool)
