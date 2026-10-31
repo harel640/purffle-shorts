@@ -56,6 +56,30 @@ def _encode_args(settings: Settings, final: bool) -> list[str]:
             "-pix_fmt", "yuv420p", "-g", str(settings.fps * 2)]
 
 
+def _image_vf(iw: int, ih: int, W: int, H: int, F: int, frames: int, ken_burns: bool, grade: str) -> str:
+    """Filter to turn one image into a 9:16 segment. A clearly-landscape image (which a cover-crop would
+    slice most of away, cutting the subject) is instead shown whole and centered over a blurred fill of
+    itself, so the subject is never cropped out. Portrait / near-9:16 images are cover-cropped (little is
+    lost). Ken Burns always zooms centered — no horizontal pan that could drift off the subject."""
+    target = W / H
+    src = (iw / ih) if iw and ih else target
+    wide = src > target * 1.5           # cover-crop would keep < ~2/3 of the width -> contain instead
+    kb = ""
+    if ken_burns:
+        z = random.choice([f"min(1+0.14*on/{frames},1.14)", f"1.14-0.14*on/{frames}"])  # zoom in or out
+        kb = (f"zoompan=z='{z}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d={frames}:s={W}x{H}:fps={F}")
+    if wide:
+        vf = (f"split=2[bg][fg];"
+              f"[bg]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},boxblur=18:1,"
+              f"eq=brightness=-0.06[bgb];"
+              f"[fg]scale={W}:{H}:force_original_aspect_ratio=decrease:flags=lanczos[fgs];"
+              f"[bgb][fgs]overlay=(W-w)/2:(H-h)/2,setsar=1")
+        return (vf + ("," + kb if kb else "")) + grade
+    if kb:
+        return f"scale={2 * W}:{2 * H}:force_original_aspect_ratio=increase,crop={2 * W}:{2 * H},{kb},setsar=1{grade}"
+    return f"scale={W}:{H}:force_original_aspect_ratio=increase:flags=lanczos,crop={W}:{H},setsar=1{grade}"
+
+
 def prepare_segment(item: MediaItem, seconds: float, idx: int, settings: Settings, work: Path) -> Path:
     W, H, F = settings.width, settings.height, settings.fps
     out = work / f"seg{idx:02d}.mp4"
@@ -84,17 +108,12 @@ def prepare_segment(item: MediaItem, seconds: float, idx: int, settings: Setting
         return out
 
     if item.kind == "image" and item.path:
+        vf = _image_vf(item.width, item.height, W, H, F, frames, settings.ken_burns, grade)
         if settings.ken_burns:
-            z = random.choice(["in", "out", "pan"])
-            zoom = {"in": f"min(1+0.16*on/{frames},1.16)", "out": f"1.16-0.16*on/{frames}", "pan": "1.12"}[z]
-            x = "(iw-iw/zoom)*on/" + str(frames) if z == "pan" else "iw/2-(iw/zoom/2)"
-            y = "ih/2-(ih/zoom/2)"
-            vf = (f"scale={2 * W}:{2 * H}:force_original_aspect_ratio=increase,crop={2 * W}:{2 * H},"
-                  f"zoompan=z='{zoom}':x='{x}':y='{y}':d={frames}:s={W}x{H}:fps={F},setsar=1{grade}")
             ffmpeg.run(["-i", str(item.path), "-vf", vf, *enc, "-frames:v", str(frames), str(out)],
                        label=f"segment {idx} (ken burns)")
         else:
-            ffmpeg.run(["-loop", "1", "-framerate", str(F), "-i", str(item.path), "-vf", f"{cover}{grade}",
+            ffmpeg.run(["-loop", "1", "-framerate", str(F), "-i", str(item.path), "-vf", vf,
                         *enc, "-frames:v", str(frames), str(out)], label=f"segment {idx} (still)")
         return out
 

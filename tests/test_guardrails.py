@@ -42,8 +42,36 @@ def test_safety_blocks_reconsider_level3(monkeypatch):
 
 def test_safety_allows_india(monkeypatch):
     monkeypatch.setattr(safety, "advisories", lambda: FEED)
-    v = safety.check("Hampi, India", FakeLLM({"country": "India", "aliases": []}))
+    v = safety.check("Hampi, India", FakeLLM({"country": "India", "aliases": [], "region": "Karnataka"}))
     assert not v.unsafe and v.level == 2
+
+
+def test_safety_blocks_level4_region(monkeypatch):
+    # India is overall Level 2, but Manipur is a Level 4 "Do Not Travel" area.
+    monkeypatch.setattr(safety, "advisories", lambda: FEED)
+    v = safety.check("A festival in Manipur, India", FakeLLM({"country": "India", "aliases": [], "region": "Manipur"}))
+    assert v.unsafe and v.level == 4 and "manipur" in v.reason.lower()
+
+
+def test_safety_blocks_level3_region(monkeypatch):
+    monkeypatch.setattr(safety, "advisories", lambda: FEED)
+    v = safety.check("Bastar, Chhattisgarh, India",
+                     FakeLLM({"country": "India", "aliases": [], "region": "Chhattisgarh"}))
+    assert v.unsafe and v.level == 3
+
+
+def test_safety_skips_when_region_unknown(monkeypatch):
+    # Fail CLOSED: India has Level 3-4 areas, so an unresolved region is skipped.
+    monkeypatch.setattr(safety, "advisories", lambda: FEED)
+    v = safety.check("Somewhere in India", FakeLLM({"country": "India", "aliases": [], "region": ""}))
+    assert v.unsafe and "region could not be determined" in v.reason.lower()
+
+
+def test_safety_no_regional_check_for_plain_country(monkeypatch):
+    # Thailand (Level 1) is not in the regional-warnings map, so a missing region is fine.
+    monkeypatch.setattr(safety, "advisories", lambda: FEED)
+    v = safety.check("Chiang Mai, Thailand", FakeLLM({"country": "Thailand", "aliases": [], "region": ""}))
+    assert not v.unsafe and v.level == 1
 
 
 def test_safety_ignores_non_country(monkeypatch):

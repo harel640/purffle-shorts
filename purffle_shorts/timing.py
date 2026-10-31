@@ -5,8 +5,16 @@ from __future__ import annotations
 
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from difflib import SequenceMatcher
+
+# Quote marks that sometimes cling to a caption word (straight, curly, backtick). Stripped from the
+# ends only, so internal apostrophes (don't, O'Brien) are kept.
+_EDGE_QUOTES = "'\"‘’“”‛‟`"
+
+
+def _strip_quotes(text: str) -> str:
+    return text.strip(_EDGE_QUOTES)
 
 
 @dataclass
@@ -278,6 +286,11 @@ def caption_chunks(words: list[Word], max_words: int = 3, max_chars: int = 20, t
             cur.clear()
 
     for w in words:
+        clean = _strip_quotes(w.text)
+        if not clean:
+            continue                      # a token that was only quote marks: nothing to show
+        if clean != w.text:
+            w = replace(w, text=clean)    # a copy, so the caller's word list keeps its original text
         if cur:
             gap = w.start - cur[-1].end
             chars = sum(len(x.text) + 1 for x in cur) + len(w.text)

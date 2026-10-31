@@ -36,6 +36,21 @@ _ALIASES = {
     "russia": ["russian federation"], "uae": ["united arab emirates"], "usa": ["united states"],
 }
 
+# Countries whose overall advisory is Level 1-2 but that contain specific Level 3-4 areas the State
+# Department calls out by name. Curated from the per-country advisories; review periodically. Each entry
+# is (region keyword, level). A place is blocked when its resolved region matches one of these; and a
+# country listed here is failed CLOSED when the region can't be determined.
+REGIONAL_WARNINGS: dict[str, list[tuple[str, int]]] = {
+    "india": [("jammu", 4), ("kashmir", 4), ("manipur", 4), ("india-pakistan border", 4),
+              ("chhattisgarh", 3), ("jharkhand", 3), ("bihar", 3), ("odisha", 3),
+              ("arunachal", 3), ("nagaland", 3), ("mizoram", 3), ("assam", 3), ("maoist", 3)],
+    "mexico": [("colima", 4), ("guerrero", 4), ("michoacan", 4), ("michoacán", 4), ("sinaloa", 4),
+               ("tamaulipas", 4), ("zacatecas", 4)],
+    "philippines": [("sulu", 4), ("mindanao", 4), ("marawi", 4)],
+    "egypt": [("sinai", 4)],
+    "colombia": [("arauca", 4), ("cauca", 4), ("norte de santander", 4)],
+}
+
 _cache: dict = {"ts": 0.0, "data": None}
 
 
@@ -65,19 +80,29 @@ def advisories() -> dict[str, int]:
     return data
 
 
-def _candidates(topic: str, llm) -> list[str]:
-    """Lower-cased country names (primary + aliases) the topic is about, or [] if not a place."""
-    system = "You identify the country a travel topic is about. Reply only with strict JSON."
+_IDENTIFY_SCHEMA = {
+    "type": "object", "additionalProperties": False,
+    "properties": {"country": {"type": "string"}, "aliases": {"type": "array", "items": {"type": "string"}},
+                   "region": {"type": "string"}},
+    "required": ["country", "aliases", "region"],
+}
+
+
+def _identify(topic: str, llm) -> tuple[list[str], str]:
+    """(lower-cased country names incl. aliases, lower-cased region/state) the topic is about.
+    Returns ([], "") when the topic is not about one specific real place."""
+    system = "You identify where a travel topic is. Reply only with strict JSON."
     user = ('Return STRICT JSON {"country": "<name or empty>", "aliases": ["other names, including the '
-            'official US State Department name if different, e.g. Burma for Myanmar"]}. '
+            'official US State Department name if different, e.g. Burma for Myanmar"], '
+            '"region": "<the state/province/region within the country the place is in, or empty>"}. '
             'If the topic is not about one specific real country/place, return an empty country.\nTopic: ' + topic)
     try:
-        data = llm.complete_json(system, user, max_tokens=200, temperature=0.0)
+        data = llm.complete_json(system, user, schema=_IDENTIFY_SCHEMA, max_tokens=250, temperature=0.0)
     except Exception as e:
-        log.warning("Safety: could not determine country for %r (%s)", topic, redact(e))
-        return []
+        log.warning("Safety: could not determine location for %r (%s)", topic, redact(e))
+        return [], ""
     if not isinstance(data, dict) or not str(data.get("country", "")).strip():
-        return []
+        return [], ""
     names = [str(data.get("country", ""))] + [str(a) for a in (data.get("aliases") or [])]
     low = [n.strip().lower() for n in names if str(n).strip()]
     for n in list(low):
@@ -86,7 +111,24 @@ def _candidates(topic: str, llm) -> list[str]:
     for n in low:
         if n and n not in out:
             out.append(n)
-    return out
+    return out, str(data.get("region", "")).strip().lower()
+
+
+def _regional_verdict(names: list[str], region: str) -> Verdict | None:
+    """For a country with named Level 3-4 areas: block when the region is one of them, fail CLOSED when the
+    region is unknown, and return None (country-level result stands) when the region is a safe one."""
+    country = next((n for n in names if n in REGIONAL_WARNINGS), None)
+    if country is None:
+        return None
+    if not region:
+        return Verdict(True, f"{country.title()}: the region could not be determined, and this country has "
+                             f"Level 3-4 areas — skipping to be safe", country)
+    for kw, lvl in REGIONAL_WARNINGS[country]:
+        if kw in region or region in kw:
+            kind = "Do Not Travel" if lvl >= 4 else "Reconsider Travel"
+            return Verdict(True, f"{country.title()} ({region.title()}): US State Dept Level {lvl} ({kind})",
+                           country, lvl)
+    return None
 
 
 def _match_level(names: list[str], feed: dict[str, int]) -> tuple[int | None, str]:
@@ -101,7 +143,7 @@ def _match_level(names: list[str], feed: dict[str, int]) -> tuple[int | None, st
 
 
 def check(topic: str, llm) -> Verdict:
-    names = _candidates(topic, llm)
+    names, region = _identify(topic, llm)
     if not names:
         return Verdict(False)  # not a specific destination -> nothing to check
     try:
@@ -116,5 +158,11 @@ def check(topic: str, llm) -> Verdict:
     if level >= BLOCK_LEVEL:
         kind = "Do Not Travel" if level >= 4 else "Reconsider Travel"
         return Verdict(True, f"{matched.title()}: US State Dept Level {level} ({kind})", matched, level)
+    # The country as a whole is Level 1-2, but it may contain Level 3-4 areas (e.g. India: Jammu & Kashmir).
+    regional = _regional_verdict(names, region)
+    if regional is not None:
+        if regional.unsafe:
+            log.warning("Safety: %s", regional.reason)
+        return regional
     log.info("Safety: %s is Level %d — ok", matched.title(), level)
     return Verdict(False, country=matched, level=level)

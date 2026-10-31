@@ -12,6 +12,26 @@ from purffle_shorts.timing import Word, caption_chunks, scene_timeline
 
 from .conftest import needs_ffmpeg
 
+from purffle_shorts.render import _image_vf
+
+
+def test_image_vf_wide_uses_blurred_contain_centered():
+    vf = _image_vf(2000, 1000, 1080, 1920, 30, 60, ken_burns=True, grade="")
+    assert "overlay=(W-w)/2:(H-h)/2" in vf and "boxblur" in vf          # whole image centered on a blurred fill
+    assert "force_original_aspect_ratio=decrease" in vf                 # contained (not cropped)
+    assert "zoompan" in vf and "iw/2-(iw/zoom/2)" in vf                 # Ken Burns stays centered
+    assert "(iw-iw/zoom)*on" not in vf                                  # no horizontal pan drift
+
+
+def test_image_vf_portrait_cover_crops():
+    vf = _image_vf(1000, 1500, 1080, 1920, 30, 60, ken_burns=True, grade="")
+    assert "overlay" not in vf and "crop=" in vf                        # near-9:16 -> cover-crop (little lost)
+    assert "iw/2-(iw/zoom/2)" in vf and "(iw-iw/zoom)*on" not in vf     # centered zoom, no drift
+
+
+def test_image_vf_unknown_dims_fall_back_to_crop():
+    assert "overlay" not in _image_vf(0, 0, 1080, 1920, 30, 60, ken_burns=False, grade="")
+
 
 @pytest.fixture
 def fast(settings):

@@ -60,6 +60,16 @@ def test_caption_chunks_break_on_punctuation_and_limits():
         assert a.end <= b.start + 1e-6
 
 
+def test_caption_chunks_strip_edge_quotes():
+    words = [Word("'LIGHT", 0.0, 0.3), Word("BATH'", 0.3, 0.6), Word("don't", 0.6, 0.9),
+             Word("“wow”", 0.9, 1.2), Word("'", 1.2, 1.3), Word("end.", 1.3, 1.6)]
+    chunks = caption_chunks(words, max_words=10)
+    shown = " ".join(w.text for c in chunks for w in c.words)
+    assert shown == "LIGHT BATH don't wow end."     # edge quotes gone, internal apostrophe kept, lone quote dropped
+    assert "'" not in "".join(c.text for c in chunks).replace("don't", "")
+    assert words[1].text == "BATH'"                  # the caller's original list is untouched
+
+
 def test_tokenize_no_space_languages():
     toks = tokenize("章鱼有三颗心脏。它的血液是蓝色的！", "zh")
     assert len(toks) >= 4 and all(len(t) <= 5 for t in toks)
