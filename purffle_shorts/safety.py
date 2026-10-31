@@ -51,6 +51,31 @@ REGIONAL_WARNINGS: dict[str, list[tuple[str, int]]] = {
     "colombia": [("arauca", 4), ("cauca", 4), ("norte de santander", 4)],
 }
 
+# Regions skipped for editorial/policy reasons, SEPARATE from travel advisories (no feed, no network).
+# Extend by adding a region name mapped to the keywords (province, major places, common identifiers)
+# that mark it.
+SENSITIVE_REGIONS: dict[str, list[str]] = {
+    "Xinjiang": ["xinjiang", "uyghur", "uighur", "uygur", "kashgar", "kashi", "urumqi", "ürümqi",
+                 "turpan", "turfan", "hotan", "khotan", "aksu", "karamay", "korla", "yarkand",
+                 "kuqa", "taklamakan", "tarim basin"],
+    "Tibet": ["tibet", "tibetan", "xizang", "lhasa", "shigatse", "xigaze", "gyantse", "nyingchi",
+              "nagqu", "qamdo", "chamdo", "ngari", "potala", "mount kailash", "mt kailash", "kailash",
+              "everest base camp tibet", "tibetan plateau"],
+}
+
+
+def sensitive_region(*texts: str) -> str | None:
+    """The sensitive region a topic/place falls in, or None. Keyword match only — separate from the
+    travel-advisory feed — so it can be checked during topic selection without any network call."""
+    blob = " ".join(t for t in texts if t).lower()
+    if not blob.strip():
+        return None
+    for region, keywords in SENSITIVE_REGIONS.items():
+        if any(re.search(rf"(?<![a-z]){re.escape(k)}(?![a-z])", blob) for k in keywords):
+            return region
+    return None
+
+
 _cache: dict = {"ts": 0.0, "data": None}
 
 

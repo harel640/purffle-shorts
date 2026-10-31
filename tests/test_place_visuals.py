@@ -93,6 +93,50 @@ def _visuals(settings, monkeypatch, pool):
     return v
 
 
+def test_wikimedia_skips_maps_and_butchery(monkeypatch):
+    data = {"query": {"pages": [
+        _page(1, "File:Shittaung Pagoda.jpg", "CC BY-SA 4.0", 1600, 1200),
+        _page(2, "File:Map of Mrauk U district.jpg", "CC BY-SA 4.0", 1600, 1200),      # map -> skip
+        _page(3, "File:Butchered goat carcass at market.jpg", "CC BY 2.0", 1600, 1200),  # butchery -> skip
+        _page(4, "File:Kaladan River boats.jpg", "CC BY 2.0", 1600, 1200),
+    ]}}
+    monkeypatch.setattr(M, "http", lambda: S(data))
+    assert [i.id for i in M.wikimedia_images("Mrauk U")] == ["1", "4"]
+
+
+def test_wiki_rank_penalizes_closeup_people():
+    terms = M._terms("Mrauk U Shittaung Pagoda temple")
+    person = MediaItem("wikimedia", "1", "image", width=1200, height=1600, text="Portrait of a monk, Mrauk U")
+    temple = MediaItem("wikimedia", "2", "image", width=1200, height=1600, text="Shittaung Pagoda, Mrauk U temple")
+    assert M._wiki_rank(temple, "temple", terms) > M._wiki_rank(person, "temple", terms)
+
+
+def test_low_quality_image_flags_blank_not_detailed(tmp_path):
+    from PIL import Image
+    blank = tmp_path / "blank.png"
+    Image.new("RGB", (200, 200), (128, 130, 129)).save(blank)
+    detailed = tmp_path / "detailed.png"
+    img = Image.new("RGB", (200, 200))
+    img.putdata([(0, 0, 0) if y < 100 else (255, 255, 255) for y in range(200) for x in range(200)])
+    img.save(detailed)
+    assert M._low_quality_image(blank) is True
+    assert M._low_quality_image(detailed) is False
+
+
+def test_place_scenes_skips_near_blank_image(settings, monkeypatch, tmp_path):
+    pool = [_wiki_item(i, f"Mrauk U landmark {i}") for i in range(6)]
+    v = _visuals(settings, monkeypatch, pool)
+    calls = {"n": 0}
+
+    def fake_lowq(_path):
+        calls["n"] += 1
+        return calls["n"] == 1          # only the first fetched image is near-blank
+
+    monkeypatch.setattr(M, "_low_quality_image", fake_lowq)
+    out = v.for_place_scenes([("landmark", "", 3.0)], "Mrauk U", "Myanmar", tmp_path / "m", min_images=5)
+    assert len(out) == 1 and out[0].source == "wikimedia" and calls["n"] >= 2   # rejected one, took the next
+
+
 def test_wiki_rank_prefers_landmark_portrait_highres_over_generic():
     terms = M._terms("Shittaung Pagoda Mrauk U temple sunrise")
     landmark = MediaItem("wikimedia", "1", "image", width=1500, height=2000,          # portrait, hi-res, named

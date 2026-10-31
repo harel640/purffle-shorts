@@ -74,6 +74,21 @@ def test_safety_no_regional_check_for_plain_country(monkeypatch):
     assert not v.unsafe and v.level == 1
 
 
+# --------------------------------------------------------------- sensitive regions (separate from advisories)
+def test_sensitive_region_flags_tibet_and_xinjiang():
+    assert safety.sensitive_region("Lhasa, Tibet, China") == "Tibet"
+    assert safety.sensitive_region("Kashgar old town") == "Xinjiang"
+    assert safety.sensitive_region("A tour of the Potala Palace") == "Tibet"
+    assert safety.sensitive_region("Hampi, India") is None
+    assert safety.sensitive_region("") is None
+    assert safety.sensitive_region("mapping the mapping") is None   # no accidental substring hits
+
+
+def test_sensitive_region_is_easy_to_extend(monkeypatch):
+    monkeypatch.setitem(safety.SENSITIVE_REGIONS, "Testland", ["testville"])
+    assert safety.sensitive_region("A visit to Testville") == "Testland"
+
+
 def test_safety_ignores_non_country(monkeypatch):
     called = []
     monkeypatch.setattr(safety, "advisories", lambda: called.append(1) or FEED)

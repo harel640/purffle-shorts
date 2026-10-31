@@ -206,9 +206,19 @@ def _wiki_title(title: str) -> str:
     return re.sub(r"[_]+", " ", t).strip() or "Wikimedia image"
 
 
+# Titles/categories that mark a file we never want as footage: maps & diagrams, or butchery/carcasses.
+_SKIP_IMAGE_RE = re.compile(
+    r"(?<![a-z])(maps?|satellite|topographic|locator|diagram|schematic|floor ?plan|site ?plan|"
+    r"sketch ?map|street ?map|road ?map|cadastral|butcher\w*|carcass\w*|slaughter\w*|abattoir|"
+    r"flayed|animal corpse|dead animal)(?![a-z])", re.I)
+# Titles that suggest a close-up identifiable person — preferred against, not skipped outright.
+_PEOPLE_RE = re.compile(r"(?<![a-z])(portraits?|selfies?|close[ -]?ups?|headshots?|posing|mugshot)(?![a-z])", re.I)
+
+
 def wikimedia_images(query: str, limit: int = 20, min_px: int = 800) -> list[MediaItem]:
     """Freely-licensed (public-domain / CC-BY / CC-BY-SA) photos of ``query`` from Wikimedia Commons.
-    Author and license are captured on each item so the video can credit them as the licenses require."""
+    Author and license are captured on each item so the video can credit them as the licenses require.
+    Maps/diagrams and butchery/carcass images are dropped outright."""
     r = http().get(_WIKI_API, timeout=30, headers={"User-Agent": _WIKI_UA}, params={
         "action": "query", "format": "json", "formatversion": 2,
         "generator": "search", "gsrsearch": f"filetype:bitmap {query}", "gsrnamespace": 6,
@@ -234,6 +244,8 @@ def wikimedia_images(query: str, limit: int = 20, min_px: int = 800) -> list[Med
         lic_url = (meta.get("LicenseUrl") or {}).get("value", "")
         obj = _TAG_RE.sub(" ", (meta.get("ObjectName") or {}).get("value", "") or "")
         cats = (meta.get("Categories") or {}).get("value", "")
+        if _SKIP_IMAGE_RE.search(f"{title} {obj} {cats}"):      # a map/diagram or butchery/carcass image
+            continue
         items.append(MediaItem("wikimedia", str(pg.get("pageid") or title), "image", url=url, width=w, height=h,
                                credit=author, author=author, license=lic, license_url=lic_url, page_url=page_url,
                                query=query, rank=rank, text=f"{title} {obj} {cats}".strip(),
@@ -387,7 +399,22 @@ def _wiki_rank(item: MediaItem, query: str, script_terms: set[str]) -> float:
         s += 1.5
     if (text_terms & _GENERIC_WORDS) and not (text_terms & script_terms):
         s -= 2.5                                                 # an empty field / plain wall of nowhere named
+    if _PEOPLE_RE.search(item.text):
+        s -= 2.0                                                 # prefer against a close-up identifiable person
     return s + 0.6 / (1.0 + 0.25 * item.rank)                    # small tiebreak by the API's own order
+
+
+def _low_quality_image(path: Path, min_std: float = 16.0) -> bool:
+    """True for a near-blank / low-contrast image (a blank wall, flat sky, fog): the standard deviation of
+    its luminance is tiny. Needs the downloaded file; returns False if it can't be read (don't over-skip)."""
+    try:
+        from PIL import Image, ImageStat
+        with Image.open(path) as im:
+            g = im.convert("L")
+            g.thumbnail((96, 96))
+            return ImageStat.Stat(g).stddev[0] < min_std
+    except Exception:
+        return False
 
 
 class Visuals:
@@ -576,6 +603,25 @@ class Visuals:
         elif item.source.startswith("pixabay"):
             self.credits.add("Pixabay")
 
+    def _good_wiki(self, cands: list[MediaItem], query: str, script_terms: set[str], dest_dir: Path,
+                   idx: int, tries: int = 4) -> MediaItem | None:
+        """Claim the best fresh candidate and download it, skipping to the next if it is near-blank /
+        low-contrast. Returns a fetched item, or None when none is usable."""
+        for _ in range(tries):
+            item = self._claim_wiki(cands, query, script_terms)
+            if item is None:
+                return None
+            try:
+                self._fetch(item, dest_dir, idx)
+            except Exception as e:
+                log.warning("Wikimedia download failed (%s)", redact(e))
+                continue
+            if _low_quality_image(item.path):
+                log.info("Scene %d: skipping near-blank/low-contrast image %s", idx + 1, item.key)
+                continue
+            return item
+        return None
+
     def for_place_scenes(self, jobs: list[tuple[str, str, float]], place: str, country: str, dest_dir: Path,
                          progress=None, min_images: int = 5) -> list[MediaItem]:
         """One Wikimedia image per scene, all of the named place. Raises SkipTopic if the place has fewer than
@@ -598,13 +644,7 @@ class Visuals:
             script_terms |= _terms(q)
         results: list[MediaItem] = []
         for i, (q, _prompt, _need) in enumerate(jobs):
-            item = self._claim_wiki(self._wiki_search(f"{q} {place}") + pool, q, script_terms)
-            if item is not None:
-                try:
-                    self._fetch(item, dest_dir, i)
-                except Exception as e:
-                    log.warning("Wikimedia download failed (%s)", redact(e))
-                    item = None
+            item = self._good_wiki(self._wiki_search(f"{q} {place}") + pool, q, script_terms, dest_dir, i)
             if item is None:                                   # no fresh place image -> place-named stock video
                 item = self._place_stock_video(q, place, country, dest_dir, i)
             if item is None:                                   # reuse the best place photo, with its own camera move

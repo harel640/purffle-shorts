@@ -320,6 +320,9 @@ class Studio:
             pick.subject = f"{topic} (source: {pick.subject})"
         log.info("Topic [%s]: %s", pick.source, pick.subject)
         try:
+            hit = safety.sensitive_region(pick.subject)   # fail fast before writing the script
+            if hit:
+                raise SkipTopic(f"sensitive region ({hit}) — skipped by policy")
             if self.llm is not None and not s.offline and s.safety_filter:
                 verdict = safety.check(pick.subject, self.llm)
                 if verdict.unsafe:
@@ -450,6 +453,11 @@ class Studio:
                     v = safety.check(", ".join(x for x in (place, country) if x), self.llm)
                     if v.unsafe:
                         raise safety.UnsafeTopic(v.reason)
+            # Sensitive-region policy skip (separate from travel advisories): place + the script's own words.
+            hit = safety.sensitive_region(place, country, script.title, script.topic,
+                                          " ".join(sc.narration for sc in script.scenes))
+            if hit:
+                raise SkipTopic(f"sensitive region ({hit}) — skipped by policy")
             self._step("voice", f"{s.tts_engine} voice")
             speech = self._speak(script, work, s)
             total = round(speech.duration + END_PAD, 3)
