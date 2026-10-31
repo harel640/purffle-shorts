@@ -1,4 +1,5 @@
 import sys
+import time
 import types
 
 import pytest
@@ -232,3 +233,67 @@ def test_ollama_uses_an_installed_model_when_default_missing(monkeypatch):
     monkeypatch.setattr(L, "ollama_models", lambda url: ["llama3.1:latest"])
     assert L.build_provider("ollama", Settings()).model == "llama3.1"
     assert L.ollama_has(["llama3.1:latest"], "llama3.1") and not L.ollama_has(["llama3.1:8b"], "llama3.1")
+
+
+# --------------------------------------------------------------- Groq per-minute rate-limit wait + retry
+PM_ERR = ('groq:openai/gpt-oss-120b: HTTP 429 — {"error":{"message":"Rate limit reached for model '
+          '`openai/gpt-oss-120b` ... on tokens per minute (TPM): Limit 8000, Used 5071, Requested 3301. '
+          'Please try again in 6.05s."}}')
+DAILY_ERR = "gemini:flash: HTTP 429 — You exceeded your current quota, please check your plan and billing details"
+
+
+class RLProvider:
+    def __init__(self, name, fail_times, err):
+        self.name, self.model, self.fail_times, self.err, self.calls = name, "m", fail_times, err, 0
+
+    def complete(self, system, user, *, schema=None, temperature=0.9, max_tokens=4000):
+        self.calls += 1
+        if self.calls <= self.fail_times:
+            raise RuntimeError(self.err)
+        return '{"ok": 1}'
+
+    def __str__(self):
+        return f"{self.name}:{self.model}"
+
+
+def _make_llm(providers):
+    lm = L.LLM.__new__(L.LLM)
+    lm.settings, lm.last_used, lm.providers = Settings(), "", providers
+    return lm
+
+
+def test_per_minute_detector():
+    assert L._is_per_minute_rate_limit(RuntimeError(PM_ERR))
+    assert L._is_per_minute_rate_limit(RuntimeError("HTTP 429 Rate limit reached ... requests per minute"))
+    assert not L._is_per_minute_rate_limit(RuntimeError(DAILY_ERR))
+    assert not L._is_per_minute_rate_limit(RuntimeError("HTTP 429 ... requests per day (RPD)"))
+    assert not L._is_per_minute_rate_limit(RuntimeError("HTTP 500 server error"))
+
+
+def test_groq_waits_and_retries_on_per_minute_limit(monkeypatch):
+    sleeps = []
+    monkeypatch.setattr(time, "sleep", lambda s: sleeps.append(s))
+    gemini = RLProvider("gemini", fail_times=99, err=DAILY_ERR)   # daily cap -> fall straight through to groq
+    groq = RLProvider("groq", fail_times=4, err=PM_ERR)           # per-minute x4, then succeeds
+    lm = _make_llm([gemini, groq])
+    assert lm.complete_json("s", "u") == {"ok": 1}
+    assert groq.calls == 5 and lm.last_used == "groq:m"
+    assert sum(1 for s in sleeps if s >= L.GROQ_RATE_LIMIT_WAIT) == 2   # two 60s waits, then it got through
+
+
+def test_groq_gives_up_after_three_waits(monkeypatch):
+    sleeps = []
+    monkeypatch.setattr(time, "sleep", lambda s: sleeps.append(s))
+    groq = RLProvider("groq", fail_times=99, err=PM_ERR)          # never recovers
+    with pytest.raises(L.LLMError):
+        _make_llm([groq]).complete_json("s", "u")
+    assert sum(1 for s in sleeps if s >= L.GROQ_RATE_LIMIT_WAIT) == L.GROQ_RATE_LIMIT_RETRIES  # capped at 3
+
+
+def test_daily_quota_does_not_wait(monkeypatch):
+    sleeps = []
+    monkeypatch.setattr(time, "sleep", lambda s: sleeps.append(s))
+    groq = RLProvider("groq", fail_times=99, err="groq:m: HTTP 429 — You exceeded your current quota")
+    with pytest.raises(L.LLMError):
+        _make_llm([groq]).complete_json("s", "u")
+    assert all(s < L.GROQ_RATE_LIMIT_WAIT for s in sleeps) and groq.calls == 2  # no 60s wait for a daily cap

@@ -11,13 +11,31 @@ import json
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass
 from typing import Any
 
 from .config import Settings
-from .utils import PermanentError, http, raise_for_status, redact, with_retries
+from .utils import PermanentError, check_cancel, http, raise_for_status, redact, with_retries
 
 log = logging.getLogger("purffle")
+
+# A per-minute rate limit (Groq TPM/RPM) clears within a minute, so wait and retry rather than give up.
+# A daily quota will not clear in a minute, so it is excluded and falls through to the next provider.
+GROQ_RATE_LIMIT_WAIT = 60.0
+GROQ_RATE_LIMIT_RETRIES = 3
+
+
+def _is_per_minute_rate_limit(error: Exception) -> bool:
+    """True for a per-minute token/request rate limit (worth a 60s wait), not a daily/quota cap."""
+    t = str(error).lower()
+    if "429" not in t and "rate limit" not in t and "too many requests" not in t:
+        return False
+    if any(k in t for k in ("per day", "per-day", " rpd", " tpd", "daily", "exceeded your current quota",
+                            "quota exceeded", "insufficient_quota", "billing")):
+        return False
+    return any(k in t for k in ("per minute", "per-minute", "tpm", "rpm", "tokens per minute",
+                                "requests per minute", "rate limit reached"))
 
 
 class LLMError(RuntimeError):
@@ -383,6 +401,7 @@ class LLM:
         errors: list[str] = []
         temp = self.settings.llm_temperature if temperature is None else temperature
         providers = list(self.providers)
+        rl_waits: dict[int, int] = {}      # per-provider count of 60s waits already spent on a per-minute limit
         i = 0
         while i < len(providers):
             p = providers[i]
@@ -404,6 +423,15 @@ class LLM:
                 if healed is not None:
                     log.info("%s model '%s' unavailable; retrying with '%s'", p.name, p.model, healed.model)
                     providers[i] = healed
+                    continue
+                # The Groq backup gets per-minute rate-limited on the free tier: that clears within a minute,
+                # so wait 60s and retry (up to 3 times) instead of skipping the video.
+                if p.name == "groq" and _is_per_minute_rate_limit(e) and rl_waits.get(i, 0) < GROQ_RATE_LIMIT_RETRIES:
+                    rl_waits[i] = rl_waits.get(i, 0) + 1
+                    log.warning("Groq hit a per-minute rate limit; waiting %.0fs then retrying (%d/%d)",
+                                GROQ_RATE_LIMIT_WAIT, rl_waits[i], GROQ_RATE_LIMIT_RETRIES)
+                    check_cancel()
+                    time.sleep(GROQ_RATE_LIMIT_WAIT)
                     continue
                 errors.append(f"{p}: {e}")
                 log.warning("LLM %s failed: %s", p, e)
