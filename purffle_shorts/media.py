@@ -250,8 +250,11 @@ def resolve_place(llm, title: str, topic: str, sample: str = "") -> tuple[str, s
     user = ('Return STRICT JSON {"place": "<most specific real place/landmark/city, or empty>", '
             '"country": "<country, or empty>"}. If there is no single real place, use empty strings.\n'
             f'Title: {title}\nTopic: {topic}\nFirst lines: {sample[:600]}')
+    schema = {"type": "object", "additionalProperties": False,
+              "properties": {"place": {"type": "string"}, "country": {"type": "string"}},
+              "required": ["place", "country"]}
     try:
-        d = llm.complete_json(system, user, max_tokens=120, temperature=0.0)
+        d = llm.complete_json(system, user, schema=schema, max_tokens=400, temperature=0.0)
     except Exception as e:
         log.warning("Place resolve failed (%s)", redact(e))
         return "", ""

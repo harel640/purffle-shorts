@@ -485,7 +485,7 @@ def synthesize_lines(lines: list[tuple[str, str]], out_dir: Path, settings: Sett
         if i + 1 < len(parts):
             listing.append(f"file '{gap.name}'")
             t += LINE_GAP
-    (out_dir / "lines.txt").write_text("\n".join(listing) + "\n")
+    (out_dir / "lines.txt").write_text("\n".join(listing) + "\n", encoding="utf-8")
     audio = out_dir / "voice.wav"
     ffmpeg.run(["-f", "concat", "-safe", "0", "-i", "lines.txt", "-c:a", "pcm_s16le", str(audio.name)],
                label="join voices", cwd=out_dir)

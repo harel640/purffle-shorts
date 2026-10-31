@@ -377,6 +377,14 @@ class Studio:
                     script = load_script(script_file, s)
                 pick, writer = Topic(script.topic, "script"), ("script file" if script_file else "editor")
                 log.info("Script from %s (%d scenes): %s", script_file or "editor", len(script.scenes), script.title)
+                if script_file and self.llm is not None and not s.offline:
+                    # Re-verify a reused script before producing (no re-writing): safety + fact-check still apply.
+                    if s.safety_filter:
+                        verdict = safety.check(script.topic or script.title, self.llm)
+                        if verdict.unsafe:
+                            raise safety.UnsafeTopic(verdict.reason)
+                    if s.fact_check:
+                        script = factcheck.scrub(self.llm, script, s)
             else:
                 script, pick, writer = self.draft(topic, source=source, style=style, url=url, document=document)
             return self.produce(script, pick, writer, upload=upload, t0=t0, languages=languages, state=state)
@@ -422,7 +430,8 @@ class Studio:
         state["folder"] = folder
         work = folder / "work"
         work.mkdir(parents=True, exist_ok=True)
-        (folder / "script.json").write_text(json.dumps(script.to_dict(), indent=2, ensure_ascii=False))
+        (folder / "script.json").write_text(json.dumps(script.to_dict(), indent=2, ensure_ascii=False),
+                                            encoding="utf-8")
         try:
             # Place-locked visuals (Wikimedia): resolve the real place and, before spending any time,
             # run the travel-advisory check on that concrete place (not just the generic topic).
@@ -555,7 +564,7 @@ class Studio:
                             for m in media + ([background] if split else [])],
                 "parent_id": parent_id, "created_at": now_iso(),
             }
-            (folder / "metadata.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False))
+            (folder / "metadata.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
 
             rid = self.history.add_video(
                 subject=pick.subject, source=pick.source, topic=script.topic, style=script.style,
@@ -668,7 +677,7 @@ class Studio:
             results = crosspost.publish(self.s, Path(rec["video_path"]), meta, others, when)
             posted.update({p: r.to_dict() for p, r in results.items()})
             meta["published"] = posted
-            meta_file.write_text(json.dumps(meta, indent=2, ensure_ascii=False))
+            meta_file.write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
             out = [r for r in results.values() if r.status in crosspost.DONE]
             failed = [r for r in results.values() if r.status not in crosspost.DONE]
             for r in out:

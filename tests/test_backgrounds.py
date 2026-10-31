@@ -106,6 +106,7 @@ def test_background_videos_are_never_used_as_scene_footage(settings, tmp_path):
     assert [i.path.name for i in M.Visuals(s2)._local("octopus")] == ["octopus.mp4"]
 
 
+@needs_ffmpeg
 def test_doctor_reports_the_background_and_the_new_editing(settings, tmp_path):
     from purffle_shorts.doctor import checks
     bg = tmp_path / "bg"
