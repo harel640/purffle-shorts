@@ -146,9 +146,9 @@ class Settings:
     # consistent cinematic style. pollinations (free, keyless, FLUX/Apache-2.0) and cloudflare (free tier,
     # FLUX.1-schnell, needs a token) are free; openai/gemini are paid. "none" = no AI, use real photos only.
     ai_scene_source: str = "pollinations"
-    ai_scene_style: str = ("historical illustration, painterly, warm dramatic lighting, muted earthy colour "
-                           "palette, highly detailed, consistent art direction, full-frame vertical 9:16 "
-                           "composition that fills the whole frame")
+    ai_scene_style: str = ("cinematic matte painting, painterly oil-on-canvas realism, realistic proportions, "
+                           "warm dramatic lighting, muted earthy colour palette, fine detail and atmospheric "
+                           "depth, consistent art direction, full-frame vertical 9:16 composition")
     cloudflare_account_id: str = ""   # Cloudflare Workers AI (free tier) account id, for ai_scene_source=cloudflare
     cloudflare_api_token: str = ""     # Cloudflare Workers AI API token (a secret, never logged)
     prefer_4k: bool = False

@@ -108,7 +108,7 @@ def test_place_pool_skips_topic_when_too_few_place_accurate(monkeypatch):
 def test_architecture_derives_from_article_region_not_country_alone():
     himal = M._architecture_hint("Pulga", "India",
                                  "Pulga is a village in Himachal Pradesh built in the kath-kuni style.")
-    assert "kath-kuni" in himal.lower() and "no domes" in himal
+    assert "kath-kuni" in himal.lower() and "timber" in himal.lower() and " no " not in himal.lower()
     # Without the article, the country fallback would wrongly draw a Himalayan village as a South Indian temple:
     assert "gopuram" in M._architecture_hint("Pulga", "India").lower()
 
@@ -142,6 +142,73 @@ def test_place_style_is_a_present_day_story_with_no_ai_and_no_cta():
 def test_place_style_uses_story_length_and_scene_count():
     assert SC.effective_seconds("place", 40) == SC.HISTORY_MIN_SECONDS
     assert SC.scene_plan("place", 75)[1] >= 6
+
+
+class _Sess:
+    def __init__(self, data):
+        self.data = data
+
+    def get(self, url, params=None, headers=None, timeout=None):
+        return _R(self.data)
+
+
+def test_wikimedia_skips_signs_notices_and_boards(monkeypatch):
+    data = {"query": {"pages": [
+        _cpage(1, "File:Temple gopuram tower.jpg"),
+        _cpage(2, "File:Information board at the temple.jpg"),     # board -> skip
+        _cpage(3, "File:Warning sign near the cliff.jpg"),         # warning + sign -> skip
+        _cpage(4, "File:Notice board.jpg"),                        # notice + board -> skip
+        _cpage(5, "File:Signpost to the gate.jpg"),                # signpost -> skip
+        _cpage(6, "File:Temple courtyard at dawn.jpg"),
+    ]}}
+    monkeypatch.setattr(M, "http", lambda: _Sess(data))
+    assert [i.id for i in M.wikimedia_images("temple")] == ["1", "6"]
+
+
+def test_historical_image_never_generates_a_deity(monkeypatch, tmp_path):
+    v = Visuals(Settings(ai_scene_source="pollinations"))
+    calls = {"n": 0}
+    monkeypatch.setattr(M, "pollinations_image", lambda *a, **k: calls.__setitem__("n", calls["n"] + 1))
+    assert v._historical_image("Lord Shiva blesses the king", tmp_path, 0, arch="x") is None
+    assert v._historical_image("Ganesha appears as a cowherd", tmp_path, 1, arch="x") is None
+    assert v._historical_image("Ravana carries the lingam", tmp_path, 2, arch="x") is None
+    assert calls["n"] == 0                                         # the generator was never even called
+    assert v.ai_used is False
+
+
+def test_historical_image_prompt_has_no_negatives(monkeypatch, tmp_path):
+    from PIL import Image
+    seen = {}
+
+    def fake_poll(prompt, dest, width, height, key=""):
+        seen["p"] = prompt
+        Image.new("RGB", (1024, 1024), (40, 40, 40)).save(dest)
+        return dest
+
+    monkeypatch.setattr(M, "pollinations_image", fake_poll)
+    v = Visuals(Settings(ai_scene_source="pollinations"))
+    v._historical_image("stonemasons raising a temple wall", tmp_path, 0,
+                        arch="South Indian gopuram temple towers")
+    p = seen["p"].lower()
+    assert " no " not in p and "letterbox" not in p and "without" not in p    # positive description only
+    assert "full-bleed vertical" in p
+
+
+def test_ai_scene_style_is_cinematic_painterly_not_cartoon():
+    style = Settings().ai_scene_style.lower()
+    assert "painterly" in style and "cinematic" in style
+    assert "cartoon" not in style and "anime" not in style
+
+
+def test_plan_ai_scenes_first_last_real_cap_5_and_40pct_real():
+    from purffle_shorts.pipeline import plan_ai_scenes
+    out = plan_ai_scenes([True] * 9)                      # all marked historical
+    assert out[0] is False and out[-1] is False           # first & last always real
+    assert sum(out) <= 5                                  # at most 5 AI
+    assert (len(out) - sum(out)) >= 4                     # >= ceil(0.4*9) real photos
+    small = plan_ai_scenes([True, True, True])
+    assert small[0] is False and small[-1] is False and sum(small) <= 1
+    assert plan_ai_scenes([False] * 6) == [False] * 6    # nothing forced on
 
 
 def test_place_style_strips_a_trailing_cta_and_keeps_all_scenes_present_day():
