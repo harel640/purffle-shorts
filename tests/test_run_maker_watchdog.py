@@ -27,6 +27,7 @@ def test_watchdog_present_and_copies_in_sync():
         assert "docker kill" in text                         # kill the container on overrun
         assert "TIMEOUT" in text                             # recorded in the daily summary
         assert "retrying once" in text                       # and retried once
+        assert "SKIPPED vision unavailable" in text          # fail-closed vision skip surfaced in the summary
     if len(copies) == 2:
         digests = {hashlib.sha256(p.read_bytes()).hexdigest() for p in copies}
         assert len(digests) == 1, "the two run-maker.ps1 copies have drifted apart"

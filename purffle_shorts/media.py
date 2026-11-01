@@ -11,6 +11,7 @@ import random
 import re
 import threading
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote
 
@@ -18,6 +19,34 @@ from .config import Settings
 from .utils import PermanentError, download, http, raise_for_status, redact, with_retries
 
 log = logging.getLogger("purffle")
+
+# Rough Cloudflare Workers AI neuron cost of one FLUX.1-schnell image (used only to keep a daily reserve for
+# the vision check; the exact figure doesn't matter, only that gen stops before it eats the reserve).
+CF_FLUX_NEURONS = 720
+
+
+class NeuronBudget:
+    """Tracks Cloudflare Workers AI neurons spent on image generation today (persisted in history meta) and
+    keeps a reserve so the vision check always has allocation. Image generation stops at the reserve."""
+
+    def __init__(self, history, daily: int, reserve: int):
+        self.history, self.daily, self.reserve = history, daily, reserve
+        self.key = f"cf_neurons:{datetime.now(timezone.utc):%Y-%m-%d}"
+
+    def _spent(self) -> int:
+        try:
+            return int(self.history.get_meta(self.key) or 0)
+        except (ValueError, TypeError):
+            return 0
+
+    def can_spend(self, cost: int) -> bool:
+        return self._spent() + cost <= max(0, self.daily - self.reserve)
+
+    def record(self, cost: int) -> None:
+        try:
+            self.history.set_meta(self.key, str(self._spent() + cost))
+        except Exception:  # accounting is best-effort; never fail a render over it
+            pass
 
 VIDEO_EXT = {".mp4", ".mov", ".m4v", ".webm", ".mkv"}
 IMAGE_EXT = {".jpg", ".jpeg", ".png", ".webp"}
@@ -573,10 +602,12 @@ def _low_quality_image(path: Path, min_std: float = 16.0) -> bool:
 
 
 class Visuals:
-    def __init__(self, settings: Settings, used_keys: set[str] | None = None, llm=None):
+    def __init__(self, settings: Settings, used_keys: set[str] | None = None, llm=None, budget=None):
         self.s = settings
         self.llm = llm                                # vision model for the photo-content check (may be None)
+        self.budget = budget                          # Cloudflare neuron budget for AI image gen (may be None)
         self._vision_cache: dict[tuple[str, str], bool | None] = {}
+        self._vision_unavailable = False              # set when the check is configured but no model answered
         self.used = set(used_keys or ())
         self.lock = threading.Lock()
         self._search_cache: dict[tuple[str, str], list[MediaItem]] = {}
@@ -727,6 +758,9 @@ class Visuals:
         self._vision_cache[ck] = verdict
         if verdict is False:
             log.info("Vision: %s does not show %r — rejected", item.extra.get("wiki_title") or item.key, subject)
+        elif verdict is None and getattr(self.llm, "vision_available", lambda: False)():
+            # A vision backend IS configured but gave no answer (down / out of quota): fail closed.
+            self._vision_unavailable = True
         return verdict
 
     def _claim_wiki(self, cands: list[MediaItem], query: str, script_terms: set[str],
@@ -832,7 +866,13 @@ class Visuals:
                 pollinations_image(full, dest, s.width, s.height, s.pollinations_api_key)
                 src = "pollinations"
             elif source in ("cloudflare", "workers-ai", "flux") and s.cloudflare_account_id and s.cloudflare_api_token:
+                if self.budget is not None and not self.budget.can_spend(CF_FLUX_NEURONS):
+                    log.info("Scene %d: Cloudflare neuron reserve reached — using a real photo, not an AI image",
+                             idx + 1)
+                    return None
                 cloudflare_image(full, dest, s.cloudflare_account_id, s.cloudflare_api_token)
+                if self.budget is not None:
+                    self.budget.record(CF_FLUX_NEURONS)
                 src = "cloudflare"
             elif source in ("openai", "openai-images", "gpt-image", "dalle") and s.openai_api_key:
                 dest = dest.with_suffix(".png")
@@ -981,6 +1021,10 @@ class Visuals:
                 alt = self._reuse_place_image(pool, q, script_terms, chosen, dest_dir, i, exclude=item.key)
                 if alt is not None:
                     item = alt
+            if self._vision_unavailable:
+                # The vision check is configured but no model answered: fail closed rather than ship a photo we
+                # could not confirm shows its subject. The launcher logs this as "SKIPPED vision unavailable".
+                raise SkipTopic("vision unavailable — cannot verify a real photo shows its subject")
             if item is None:
                 item = MediaItem("generated", f"gradient-{i}", "generated", query=q)
             consec = consec + 1 if item.key == prev_key else 1

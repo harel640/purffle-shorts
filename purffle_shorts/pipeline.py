@@ -22,7 +22,7 @@ from .config import Settings
 from .history import History, now_iso
 from .llm import LLM, LLMConfigError
 from . import factcheck, safety
-from .media import MediaItem, SkipTopic, Visuals, background_item, resolve_place
+from .media import MediaItem, NeuronBudget, SkipTopic, Visuals, background_item, resolve_place
 from .overlays import EMOJI_CREDIT, ChatMessage, build_overlays
 from .render import pick_cover, render_video, split_sizes
 from .script import (
@@ -559,8 +559,10 @@ class Studio:
                 credits = set(credits or ())
             else:
                 # split layout: the footage fills the top half, so search for the shape of that half
+                budget = (NeuronBudget(self.history, s.cloudflare_daily_neurons, s.cloudflare_vision_reserve)
+                          if s.cloudflare_account_id and s.cloudflare_api_token else None)
                 visuals = Visuals(replace(s, resolution=split_sizes(s)[0]) if split else s,
-                                  self.history.used_media(), llm=self.llm)
+                                  self.history.used_media(), llm=self.llm, budget=budget)
                 if place_locked and place:
                     # Hybrid, one image per scene: a real Wikimedia photo of the place today, or an AI
                     # illustration for scenes set in the past. All shots of a scene share its image (a new
