@@ -246,6 +246,89 @@ def test_opening_scene_is_the_strongest_landmark_photo_not_generic(monkeypatch, 
     assert out[0].id == "t1"       # opener is the hi-res temple photo, not the grass/trees shot
 
 
+class _FakeVisionLLM:
+    """Stands in for the LLM vision check. ``verdicts`` maps an image key (or 'subject:...') to yes/no/None."""
+    def __init__(self, verdicts):
+        self.verdicts = verdicts
+        self.calls = 0
+
+    def image_shows(self, path, subject):
+        self.calls += 1
+        for key, v in self.verdicts.items():
+            if key.startswith("subject:") and key[8:] in subject:
+                return v
+        return self.verdicts.get(str(path), self.verdicts.get("*"))
+
+
+def test_image_shows_parses_yes_no(monkeypatch, tmp_path):
+    from purffle_shorts.llm import LLM
+    monkeypatch.setenv("GROQ_API_KEY", "k")
+    img = tmp_path / "x.jpg"
+    img.write_bytes(b"\xff\xd8\xff\xe0 jpeg bytes")
+    answers = iter(["Yes.", "no", "maybe"])
+
+    class _Resp:
+        status_code = 200
+        def json(self):
+            return {"choices": [{"message": {"content": next(answers)}}]}
+
+    class _Sess:
+        def post(self, url, json=None, headers=None, timeout=None):
+            return _Resp()
+
+    monkeypatch.setattr("purffle_shorts.llm.http", lambda: _Sess())
+    llm = LLM.__new__(LLM)                       # bypass provider wiring; we only test image_shows
+    llm.settings = Settings()
+    assert llm.image_shows(img, "a temple") is True
+    assert llm.image_shows(img, "a temple") is False
+    assert llm.image_shows(img, "a temple") is None    # unusable answer -> None
+
+
+def test_verify_subject_rejects_and_caches(monkeypatch, tmp_path):
+    v = Visuals(Settings(), llm=_FakeVisionLLM({"*": False}))
+    item = _wimg("k1", "Gokarna temple")
+    item.path = tmp_path / "k1.jpg"
+    item.path.write_bytes(b"x")
+    assert v.verify_subject(item, "a temple") is False
+    v.llm.verdicts["*"] = True                   # change the answer; cache must stick to the first verdict
+    assert v.verify_subject(item, "a temple") is False
+    assert v.llm.calls == 1                       # second call served from cache
+
+
+def test_good_wiki_skips_a_photo_the_pixels_dont_show(monkeypatch, tmp_path):
+    # Vision says the dirt-road photo (t1) is NOT a temple; the next candidate (t2) is accepted.
+    verdicts = {}
+    v = Visuals(Settings(visual_sources=["wikimedia"]),
+                llm=_FakeVisionLLM(verdicts))
+    pool = [_wimg("t1", "Gokarna Mahabaleshwar temple", w=2000, h=1500),   # title says temple, pixels don't
+            _wimg("t2", "Gokarna Mahabaleshwar temple", w=1600, h=1200)]
+    monkeypatch.setattr(v, "_fetch", lambda item, d, i: (setattr(item, "path", d / f"{item.id}.jpg") or item))
+    monkeypatch.setattr(M, "_low_quality_image", lambda p: False)
+
+    def shows(path, subject):
+        v.llm.calls += 1
+        return "t2" in str(path)                  # only t2 really shows the temple
+
+    v.llm.image_shows = shows
+    got = v._good_wiki(pool, "temple", M._terms("Gokarna temple"), tmp_path / "m", 0, subject="a temple")
+    assert got is not None and got.id == "t2"
+
+
+def test_landmark_opener_excludes_animal_and_people_titles(monkeypatch, tmp_path):
+    # No vision available (llm=None): the opener still refuses a monkey/tourist photo for the landmark.
+    v = Visuals(Settings(visual_sources=["wikimedia"]), llm=None)
+    pool = [_wimg("m1", "Monkey at Gokarna temple", w=2000, h=1500),   # animal main subject -> never the opener
+            _wimg("t1", "Gokarna Mahabaleshwar temple tower", w=1600, h=1200)]
+    monkeypatch.setattr(M, "geosearch_images", lambda *a, **k: list(pool))
+    monkeypatch.setattr(v, "_wiki_search", lambda q: [])
+    monkeypatch.setattr(v, "_fetch", lambda item, d, i: (setattr(item, "path", d / f"{item.id}.jpg") or item))
+    monkeypatch.setattr(M, "_low_quality_image", lambda p: False)
+    jobs = [("Mahabaleshwar temple", "", False), ("temple", "", False), ("temple", "", False)]
+    out = v.for_place_scenes(jobs, "Gokarna", "India", tmp_path / "m", min_images=2, lat=14.5, lon=74.3,
+                             title="Why does Gokarna's Mahabaleshwar temple hide a secret?")
+    assert out[0].id == "t1"                      # the monkey photo is never the opener
+
+
 def test_ai_scene_style_is_cinematic_painterly_not_cartoon():
     style = Settings().ai_scene_style.lower()
     assert "painterly" in style and "cinematic" in style

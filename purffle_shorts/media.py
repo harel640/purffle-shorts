@@ -217,6 +217,13 @@ _SKIP_IMAGE_RE = re.compile(
     r"butcher\w*|carcass\w*|slaughter\w*|abattoir|flayed|animal corpse|dead animal)(?![a-z])", re.I)
 # Titles that suggest a close-up identifiable person — preferred against, not skipped outright.
 _PEOPLE_RE = re.compile(r"(?<![a-z])(portraits?|selfies?|close[ -]?ups?|headshots?|posing|mugshot)(?![a-z])", re.I)
+# Titles whose MAIN subject is an animal or a person — never used for a landmark scene when the vision check
+# can't run (fix for a "temple" file that is really a monkey or a tourist).
+_ANIMAL_PEOPLE_RE = re.compile(
+    r"(?<![a-z])(monkeys?|langurs?|macaques?|dogs?|cats?|cows?|bulls?|goats?|sheep|birds?|peacocks?|"
+    r"elephants?|horses?|donkeys?|monkey|animals?|wildlife|"
+    r"portraits?|selfies?|men|women|man|woman|child|children|boys?|girls?|people|crowd|crowds|"
+    r"tourists?|pilgrims?|sadhus?|priests?|family|families|group photo)(?![a-z])", re.I)
 
 
 def _wiki_item(pg: dict, rank: int, min_px: int, query: str = "") -> MediaItem | None:
@@ -566,8 +573,10 @@ def _low_quality_image(path: Path, min_std: float = 16.0) -> bool:
 
 
 class Visuals:
-    def __init__(self, settings: Settings, used_keys: set[str] | None = None):
+    def __init__(self, settings: Settings, used_keys: set[str] | None = None, llm=None):
         self.s = settings
+        self.llm = llm                                # vision model for the photo-content check (may be None)
+        self._vision_cache: dict[tuple[str, str], bool | None] = {}
         self.used = set(used_keys or ())
         self.lock = threading.Lock()
         self._search_cache: dict[tuple[str, str], list[MediaItem]] = {}
@@ -702,6 +711,24 @@ class Visuals:
         self._wiki_cache[q.lower()] = items
         return items
 
+    def verify_subject(self, item: MediaItem, subject: str) -> bool | None:
+        """Ask the vision model whether the downloaded image actually shows ``subject`` (Commons titles lie).
+        Cached per (image, subject). Returns True/False, or None when no vision model is available."""
+        if not subject or not getattr(self.s, "vision_check", True) or self.llm is None or not item.path:
+            return None
+        ck = (item.key, subject.lower())
+        if ck in self._vision_cache:
+            return self._vision_cache[ck]
+        try:
+            verdict = self.llm.image_shows(item.path, subject)
+        except Exception as e:
+            log.debug("vision check errored (%s)", redact(e))
+            verdict = None
+        self._vision_cache[ck] = verdict
+        if verdict is False:
+            log.info("Vision: %s does not show %r — rejected", item.extra.get("wiki_title") or item.key, subject)
+        return verdict
+
     def _claim_wiki(self, cands: list[MediaItem], query: str, script_terms: set[str],
                     avoid: set[str] | None = None) -> MediaItem | None:
         with self.lock:
@@ -754,9 +781,11 @@ class Visuals:
             self.credits.add("Pixabay")
 
     def _good_wiki(self, cands: list[MediaItem], query: str, script_terms: set[str], dest_dir: Path,
-                   idx: int, tries: int = 4, avoid: set[str] | None = None) -> MediaItem | None:
-        """Claim the best fresh candidate and download it, skipping to the next if it is near-blank /
-        low-contrast. Returns a fetched item, or None when none is usable."""
+                   idx: int, tries: int = 4, avoid: set[str] | None = None, subject: str = "",
+                   landmark: bool = False) -> MediaItem | None:
+        """Claim the best fresh candidate and download it, skipping to the next if it is near-blank, or if a
+        vision model says it doesn't actually show ``subject``. When vision can't run, a landmark scene also
+        refuses a photo whose title's main subject is an animal or a person. Returns a fetched item or None."""
         for _ in range(tries):
             item = self._claim_wiki(cands, query, script_terms, avoid)
             if item is None:
@@ -769,6 +798,11 @@ class Visuals:
             if _low_quality_image(item.path):
                 log.info("Scene %d: skipping near-blank/low-contrast image %s", idx + 1, item.key)
                 continue
+            verdict = self.verify_subject(item, subject)
+            if verdict is False:
+                continue                                         # the pixels don't show the subject -> next
+            if verdict is None and landmark and _ANIMAL_PEOPLE_RE.search(item.text):
+                continue                                         # no vision: don't risk an animal/person on a landmark
             return item
         return None
 
@@ -862,16 +896,18 @@ class Visuals:
         return pool
 
     def _open_landmark_image(self, pool: list[MediaItem], landmark_terms: set[str], place: str, country: str,
-                             dest_dir: Path) -> MediaItem | None:
+                             dest_dir: Path, subject: str = "") -> MediaItem | None:
         """Scene 1: the strongest real photo of the main landmark named in the title — best title-match and
-        resolution, never a generic ground/tree/sky shot. Returns None (normal selection takes over) only if
-        the pool has nothing that names the landmark."""
+        resolution, never a generic ground/tree/sky shot, never an animal/person, and (when a vision model is
+        available) one the pixels confirm shows the landmark. Returns None if the pool has nothing suitable."""
         place_terms = _terms(place) | _terms(country)
 
         def rank(c: MediaItem) -> float:
             tt = _terms(c.text)
             if (tt & _GENERIC_WORDS) and not (tt & landmark_terms):
                 return -1.0                                    # a 'field / trees / sky' shot is never the opener
+            if _ANIMAL_PEOPLE_RE.search(c.text):
+                return -1.0                                    # a monkey / tourist is never the landmark opener
             named = len(tt & landmark_terms)
             if not named:
                 return 0.0                                     # doesn't name the landmark -> not a valid opener
@@ -882,7 +918,7 @@ class Visuals:
                 s += 0.8
             return s
 
-        for _ in range(4):                                     # try the best few, skipping any near-blank image
+        for _ in range(6):                                     # try the best few, skipping near-blank/mismatched
             with self.lock:
                 cands = [c for c in pool if c.key not in self.used and rank(c) > 0]
                 if not cands:
@@ -896,6 +932,8 @@ class Visuals:
                 log.warning("Opening landmark download failed (%s)", redact(e))
                 continue
             if _low_quality_image(item.path):
+                continue
+            if self.verify_subject(item, subject) is False:    # the pixels don't show the landmark -> next
                 continue
             return item
         return None
@@ -915,17 +953,25 @@ class Visuals:
         script_terms = _terms(place) | _terms(country)
         for q, _p, _h in jobs:
             script_terms |= _terms(q)
-        landmark_terms = (_terms(title) - _terms(place) - _terms(country)) or script_terms
+        opener_q = jobs[0][0] if jobs else ""                  # the first scene's own query names the landmark too
+        landmark_terms = ((_terms(title) | _terms(opener_q)) - _terms(place) - _terms(country)) or script_terms
+        # The subject the opener and the last scene must actually show (checked in pixels, not the title).
+        landmark_subject = " ".join(
+            dict.fromkeys(list(landmark_terms)[:4] + [w for w in [place] if w])).strip() or place
         arch = _architecture_hint(place, country, article)     # draw the past in THIS place's architecture/region
         results: list[MediaItem] = []
         chosen: set[str] = set()                               # distinctive subjects already shown this video
         prev_key, consec = None, 0
+        last = len(jobs) - 1
         for i, (q, prompt, historical) in enumerate(jobs):
+            is_landmark = i == 0 or i == last                  # opener & closer must show the main landmark
+            subject = landmark_subject if is_landmark else (q or place)
             item = self._historical_image(prompt or q, dest_dir, i, arch) if historical else None
             if item is None and i == 0:                        # opener: the strongest photo of the title landmark
-                item = self._open_landmark_image(pool, landmark_terms, place, country, dest_dir)
+                item = self._open_landmark_image(pool, landmark_terms, place, country, dest_dir, landmark_subject)
             if item is None:                                   # place-today scene, or AI unavailable/failed
-                item = self._good_wiki(pool, q, script_terms, dest_dir, i, avoid=chosen)
+                item = self._good_wiki(pool, q, script_terms, dest_dir, i, avoid=chosen,
+                                       subject=subject, landmark=is_landmark)
             if item is None:                                   # no fresh place image -> place-named stock video
                 item = self._place_stock_video(q, place, country, dest_dir, i)
             if item is None:                                   # last resort: an unused place photo (never a repeat)

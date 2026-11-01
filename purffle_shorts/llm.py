@@ -438,6 +438,55 @@ class LLM:
                 i += 1
         raise LLMError("All LLM providers failed:\n  " + "\n  ".join(errors))
 
+    # Free vision models for the photo-content check (image + yes/no), tried in order. Groq's Llama-4-Scout
+    # is fast and free; Gemini Flash is the backup. Both read an image via the OpenAI-compatible image_url.
+    VISION_CANDIDATES = [
+        ("groq", "https://api.groq.com/openai/v1", ("GROQ_API_KEY",), "meta-llama/llama-4-scout-17b-16e-instruct"),
+        ("gemini", "https://generativelanguage.googleapis.com/v1beta/openai",
+         ("GEMINI_API_KEY", "GOOGLE_API_KEY"), "gemini-2.5-flash"),
+    ]
+
+    def image_shows(self, image_path, subject: str) -> bool | None:
+        """Ask a free vision model whether ``image_path`` clearly shows ``subject``. Returns True/False, or
+        None when no vision model is reachable or the answer is unusable (caller then falls back to ranking)."""
+        import base64
+        import mimetypes
+        from pathlib import Path as _Path
+
+        try:
+            raw = _Path(image_path).read_bytes()
+        except OSError:
+            return None
+        mime = mimetypes.guess_type(str(image_path))[0] or "image/jpeg"
+        uri = f"data:{mime};base64,{base64.b64encode(raw).decode()}"
+        question = (f'Does this image clearly show {subject}? The main subject must be {subject}, not something '
+                    f'else (not a sign, an animal, a person, food, or an unrelated place). Answer only "yes" or "no".')
+        override = (self.settings.vision_model or "").strip()
+        for name, base_url, envs, model in self.VISION_CANDIDATES:
+            key = next((os.environ[e] for e in envs if os.getenv(e)), "")
+            if not key:
+                continue
+            payload = {
+                "model": override or model, "temperature": 0, "max_tokens": 4,
+                "messages": [{"role": "user", "content": [
+                    {"type": "text", "text": question},
+                    {"type": "image_url", "image_url": {"url": uri}}]}],
+            }
+            try:
+                r = http().post(f"{base_url}/chat/completions", json=payload, timeout=60,
+                                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"})
+                raise_for_status(r, f"vision {name}")
+                ans = (r.json()["choices"][0]["message"]["content"] or "").strip().lower()
+            except Exception as e:
+                log.debug("vision check via %s failed: %s", name, redact(e))
+                continue
+            if ans.startswith(("yes", "y ")) or ans in ("y", "true"):
+                return True
+            if ans.startswith(("no", "n ")) or ans in ("n", "false"):
+                return False
+            return None     # a usable model gave an unusable answer: don't keep spending calls
+        return None
+
     def _reselect_on_model_gone(self, provider: Provider, error: Exception) -> Provider | None:
         """If ``error`` means the model is gone, rebuild the provider on the next newest model
         (refreshing the list) and return it, else None. Each model name is tried at most once."""
