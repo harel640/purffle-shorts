@@ -125,6 +125,10 @@ class History:
         return [r["resolved_place"] for r in self._all(
             "SELECT resolved_place FROM videos WHERE resolved_place IS NOT NULL AND created_at >= ?", (cutoff,))]
 
+    def videos_for_place_backfill(self) -> list[dict]:
+        """Every video with the fields needed to fill in its resolved place."""
+        return self._all("SELECT id, topic, subject, title, folder, resolved_place FROM videos ORDER BY id")
+
     def pending_uploads(self, statuses: tuple[str, ...] = ("queued",)) -> list[dict]:
         """queued = deferred by the daily quota; rendered = made with --no-upload."""
         marks = ", ".join("?" for _ in statuses)

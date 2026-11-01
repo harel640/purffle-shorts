@@ -1,9 +1,45 @@
+import json
 from datetime import datetime, timedelta, timezone
 
 from purffle_shorts.config import Settings, parse_resolution
 from purffle_shorts.history import History
-from purffle_shorts.pipeline import place_recently_used
+from purffle_shorts.pipeline import Studio, place_recently_used
 from purffle_shorts.utils import redact
+
+
+def test_backfill_places_uses_source_url_topic_and_title(tmp_path):
+    s = Settings(data_dir=str(tmp_path / "data"), output_dir=str(tmp_path / "out"), offline=True, upload=False)
+    studio = Studio(s)                       # offline -> no LLM, so only the file + heuristic paths run
+    h = studio.history
+    folder = tmp_path / "vid1"
+    folder.mkdir()
+    (folder / "metadata.json").write_text(json.dumps({"source_url": "https://en.wikipedia.org/wiki/Mrauk_U"}),
+                                          encoding="utf-8")
+    id1 = h.add_video(status="rendered", title="The lost city", topic="offbeat towns in Asia", folder=str(folder))
+    id2 = h.add_video(status="rendered", title="Whatever", topic="Hampi, India: a lost city")
+    id3 = h.add_video(status="rendered", title="Kashgar: the desert town", topic="offbeat towns in Asia")
+    id4 = h.add_video(status="rendered", title="Octopuses Are Aliens", topic="octopus superpowers")
+    out = {r["id"]: r for r in studio.backfill_places()}
+    assert out[id1]["place"] == "Mrauk U" and out[id1]["via"] == "source_url"
+    assert out[id2]["place"] == "Hampi, India" and out[id2]["via"] == "topic"
+    assert out[id3]["place"] == "Kashgar" and out[id3]["via"] == "title"
+    assert out[id4]["place"] is None and out[id4]["via"] == "unresolved"    # not a place -> left NULL
+    places = h.recent_places(90)
+    assert "Mrauk U" in places and "Hampi, India" in places and "Kashgar" in places
+    # Re-running only revisits rows still without a place (the non-place row); nothing new is filled.
+    assert all(r["place"] is None for r in studio.backfill_places())
+
+
+def test_backfill_trusts_llm_empty_over_title_heuristic(tmp_path, monkeypatch):
+    import purffle_shorts.pipeline as P
+    s = Settings(data_dir=str(tmp_path / "data"), output_dir=str(tmp_path / "out"), upload=False)
+    studio = P.Studio(s)
+    studio._llm = object()                                   # pretend an LLM is available
+    monkeypatch.setattr(P, "resolve_place", lambda *a, **k: ("", ""))   # LLM: this is not a place
+    rid = studio.history.add_video(status="rendered", title="Ostrich Eyes: Bigger Than Brain",
+                                   topic="ostrich eye size")
+    out = {r["id"]: r for r in studio.backfill_places()}
+    assert out[rid]["place"] is None and out[rid]["via"] == "unresolved"   # heuristic must NOT invent a place
 
 
 def test_recent_places_only_within_window(tmp_path):

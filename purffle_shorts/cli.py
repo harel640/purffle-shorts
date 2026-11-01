@@ -328,6 +328,25 @@ def cmd_history(args, s: Settings) -> int:
     return 0
 
 
+def cmd_backfill_places(args, s: Settings) -> int:
+    from .pipeline import Studio
+    studio = Studio(s)
+    rows = studio.backfill_places()
+    filled = [r for r in rows if r["place"]]
+    if not rows:
+        print("No history rows to backfill.")
+        return 0
+    print(f"Backfilled resolved_place for {len(filled)} of {len(rows)} row(s):\n")
+    print(f"{'ID':>4}  {'VIA':9}  {'PLACE':34}  TITLE")
+    for r in rows:
+        print(f"{r['id']:>4}  {r['via']:9}  {(r['place'] or '—'):34.34}  {r['title'][:50]}")
+    unresolved = [r for r in rows if not r["place"]]
+    if unresolved:
+        print(f"\n{len(unresolved)} left unresolved (not a specific place, or no data): "
+              + ", ".join(f"#{r['id']}" for r in unresolved))
+    return 0
+
+
 def cmd_providers(args, s: Settings) -> int:
     from .llm import PRESETS, _key_for, ollama_models, ollama_url
     from .utils import http
@@ -547,6 +566,11 @@ def build_parser() -> argparse.ArgumentParser:
     h.add_argument("--limit", type=int, default=25)
     h.add_argument("--env-file")
     h.set_defaults(func=cmd_history)
+
+    bp = sub.add_parser("backfill-places", help="fill resolved_place on old rows so the place de-dup covers them")
+    bp.add_argument("--env-file")
+    bp.add_argument("-v", "--verbose", action="store_true")
+    bp.set_defaults(func=cmd_backfill_places)
 
     v = sub.add_parser("voices", help="list free neural voices (edge-tts)")
     v.add_argument("--lang", help="filter by language/locale, e.g. en, en-GB, hi")

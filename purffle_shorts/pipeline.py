@@ -824,6 +824,63 @@ class Studio:
                 done += 1
         return done
 
+    def _resolve_place_for_backfill(self, row: dict) -> tuple[str, str]:
+        """Best resolved place for an existing row, and how it was found: the video's saved Wikipedia
+        source_url, else the LLM resolving from its title/topic/script, else a simple heuristic."""
+        folder = row.get("folder")
+        title = (row.get("title") or "").strip()
+        topic = (row.get("topic") or "").strip()
+        narration, meta = "", {}
+        if folder:
+            try:
+                meta = json.loads((Path(folder) / "metadata.json").read_text(encoding="utf-8"))
+            except Exception:
+                meta = {}
+            try:
+                sj = json.loads((Path(folder) / "script.json").read_text(encoding="utf-8"))
+                narration = " ".join(str(s.get("narration", "")) for s in (sj.get("scenes") or [])[:3])
+                topic = topic or str(sj.get("topic", ""))
+                title = title or str(sj.get("title", ""))
+            except Exception:
+                pass
+        # 1. The Wikipedia article the video was grounded in IS its resolved place.
+        m = re.search(r"/wiki/([^?#]+)", str(meta.get("source_url") or ""))
+        if m:
+            from urllib.parse import unquote
+            return unquote(m.group(1)).replace("_", " ").strip(), "source_url"
+        # 2. Resolve from the title/topic, exactly as production does. When the LLM runs and finds no single
+        #    place, trust that (don't let the heuristic invent one from a non-place title like "Ostrich Eyes:").
+        if self.llm is not None:
+            try:
+                place, country = resolve_place(self.llm, title, topic, narration)
+                if place:
+                    return ", ".join(x for x in (place, country) if x), "llm"
+                return "", "unresolved"
+            except Exception as e:
+                log.warning("Backfill resolve failed for #%s: %s", row.get("id"), redact(e))
+                # fall through to the heuristic only when the LLM could not be consulted
+        # 3. Heuristic fallback (LLM offline or errored): a "Place, Country" topic, or the title's lead phrase.
+        head = topic.split(":")[0].strip()
+        if "," in head and not head.lower().endswith("in asia"):
+            return head, "topic"
+        lead = title.split(":")[0].strip()
+        if ":" in title and lead and lead[0].isupper() and len(lead.split()) <= 4:
+            return lead, "title"
+        return "", "unresolved"
+
+    def backfill_places(self) -> list[dict]:
+        """Fill resolved_place for every history row that lacks it, so the place de-dup covers everything
+        already made. Returns a record per row touched: {id, title, place, via}."""
+        out: list[dict] = []
+        for row in self.history.videos_for_place_backfill():
+            if (row.get("resolved_place") or "").strip():
+                continue
+            place, via = self._resolve_place_for_backfill(row)
+            if place:
+                self.history.update_video(row["id"], resolved_place=place)
+            out.append({"id": row["id"], "title": row.get("title") or "", "place": place or None, "via": via})
+        return out
+
     def delete(self, rid: int) -> bool:
         """Remove a video from the library and delete its folder (never touches YouTube)."""
         rec = self.history.get(rid)
