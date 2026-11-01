@@ -282,9 +282,13 @@ def build_prompt(subject: str, style: str, settings: Settings, avoid: list[str],
             "- search_query: 2-5 English words naming the real present-day place or landmark of that scene (e.g. "
             "\"Hampi Virupaksha temple\", \"Vittala stone chariot\"), so a real photo of it can be found.\n"
             "- image_prompt: for a PAST scene, one vivid English sentence recreating that historical moment — the "
-            "people, clothing and architecture as they were then — for a cinematic illustration. No text or letters.\n"
-            "- historical: true for a scene set in the PAST (people/events long ago), false for a scene showing the "
-            "place as it is TODAY (ruins, landscape, what a visitor sees now). Use a MIX of both.\n")
+            "ordinary people (builders, traders, rulers, pilgrims), their clothing and the architecture as they "
+            "were then. Describe only what is in the scene. NEVER depict a god, goddess, deity or religious "
+            "figure; a myth is told in the narration as \"legend says\" and shown with a real photo of the "
+            "temple, so mark such a scene historical=false.\n"
+            "- historical: true only for a scene of real PAST people/events we may illustrate; false for a scene "
+            "of the place TODAY (ruins, landscape, what a visitor sees now) AND for any myth or any scene about a "
+            "deity. Use a MIX, with real-place scenes first and last.\n")
     elif style == "place":
         visual_rules = (
             "- search_query: 2-5 English words naming the real present-day place, landmark or landscape of that "

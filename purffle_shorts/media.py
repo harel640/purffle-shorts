@@ -206,11 +206,13 @@ def _wiki_title(title: str) -> str:
     return re.sub(r"[_]+", " ", t).strip() or "Wikimedia image"
 
 
-# Titles/categories that mark a file we never want as footage: maps & diagrams, or butchery/carcasses.
+# Titles/categories that mark a file we never want as footage: maps & diagrams, signs/notices/text boards
+# (they read as on-screen text), or butchery/carcasses.
 _SKIP_IMAGE_RE = re.compile(
     r"(?<![a-z])(maps?|satellite|topographic|locator|diagram|schematic|floor ?plan|site ?plan|"
-    r"sketch ?map|street ?map|road ?map|cadastral|butcher\w*|carcass\w*|slaughter\w*|abattoir|"
-    r"flayed|animal corpse|dead animal)(?![a-z])", re.I)
+    r"sketch ?map|street ?map|road ?map|cadastral|"
+    r"signs?|signboards?|signposts?|noticeboards?|notices?|warnings?|billboards?|boards?|plaques?|"
+    r"butcher\w*|carcass\w*|slaughter\w*|abattoir|flayed|animal corpse|dead animal)(?![a-z])", re.I)
 # Titles that suggest a close-up identifiable person — preferred against, not skipped outright.
 _PEOPLE_RE = re.compile(r"(?<![a-z])(portraits?|selfies?|close[ -]?ups?|headshots?|posing|mugshot)(?![a-z])", re.I)
 
@@ -357,50 +359,62 @@ def cloudflare_image(prompt: str, dest: Path, account_id: str, token: str, steps
     return with_retries(_do, attempts=2, label="Cloudflare image")
 
 
-# Period discipline for every historical AI illustration (keeps anachronisms out).
-_HISTORICAL_PERIOD = "period-accurate, no modern clothing, no backpacks or modern objects"
+# Period discipline for every historical AI illustration. Positive detail only — FLUX draws whatever is named,
+# so we describe the period's own clothing and objects rather than listing modern ones to exclude.
+_HISTORICAL_PERIOD = ("period-accurate historical scene: people in handwoven robes and simple sandals, carrying "
+                      "cloth bundles and clay pots, lit by oil lamps and daylight")
+
+# Scenes that must NOT be AI-generated: a deity, god or religious figure. We illustrate these with a real photo
+# of the temple/place instead and let the narration tell the myth as "legend says".
+_DEITY_RE = re.compile(
+    r"(?<![a-z])(deity|deities|god|gods|goddess(?:es)?|divine|lord\s+\w+|idol|avatar|incarnation|"
+    r"shiva|vishnu|brahma|ganesha|ganesh|parvati|durga|kali|lakshmi|hanuman|krishna|rama|lingam|atmalinga|"
+    r"buddha|bodhisattva|avalokiteshvara|guanyin|allah|prophet|jesus|christ|saint|angel|demon|rakshasa|"
+    r"ravana|asura|naga)(?![a-z])", re.I)
 
 # Architecture cue per place, so a past scene is drawn in the style of THAT place rather than one hardcoded
-# look. Keyed by country (or a distinctive place keyword); extend by adding an entry.
-# Each cue leads with the place's own temple style and ends with an explicit "no domes" for the styles that
-# don't have them (gopurams / stupas / pagodas / dzongs) — placed FIRST in the prompt so the model obeys it.
+# look. Keyed by country (or a distinctive place keyword); extend by adding an entry. FLUX draws whatever a
+# prompt names, so every cue describes the real style POSITIVELY (its roofs, towers and materials) and never
+# says "no domes" — the specific roof it DOES name is what keeps the wrong roof out. Placed first in the prompt.
 _ARCHITECTURE = {
-    "india": "South Indian stone temple architecture with tall gopuram towers and pillared mandapas, no domes",
-    "myanmar": "Burmese temple architecture with gilded stupas and zedi spires, no domes",
-    "burma": "Burmese temple architecture with gilded stupas and zedi spires, no domes",
-    "thailand": "Thai temple architecture with chedi stupas and tiered gilded roofs, no domes",
-    "cambodia": "Khmer temple architecture with laterite and sandstone prangs (Angkor style), no domes",
-    "indonesia": "Indonesian candi architecture with stepped stone terraces (Borobudur/Prambanan style), no domes",
-    "sri lanka": "Sinhalese architecture with dagoba stupas and carved stone pillars, no domes",
-    "nepal": "Newar pagoda architecture with tiered wooden roofs and carved struts, no domes",
-    "japan": "Japanese architecture with wooden temples and pagodas and curved tiled roofs, no domes",
-    "china": "Chinese architecture with timber halls and upturned tiled eaves, no domes",
-    "vietnam": "Vietnamese architecture with tiled curved roofs and Cham brick towers, no domes",
-    "laos": "Lao temple architecture with that stupas and tiered roofs, no domes",
-    "bhutan": "Bhutanese dzong architecture, fortress-monasteries with sloping whitewashed walls, no domes",
+    "india": "South Indian stone temple architecture with tall tiered gopuram gateway towers and flat-roofed "
+             "pillared mandapa halls of carved granite",
+    "myanmar": "Burmese temple architecture with gilded bell-shaped stupas and tapering zedi spires",
+    "burma": "Burmese temple architecture with gilded bell-shaped stupas and tapering zedi spires",
+    "thailand": "Thai temple architecture with pointed chedi stupas and steep tiered gilded roofs",
+    "cambodia": "Khmer temple architecture with corn-cob sandstone prang towers and laterite galleries (Angkor style)",
+    "indonesia": "Indonesian candi architecture with stepped volcanic-stone terraces (Borobudur/Prambanan style)",
+    "sri lanka": "Sinhalese architecture with white hemispherical dagoba stupas and carved stone pillars",
+    "nepal": "Newar pagoda architecture with tiered sloping wooden roofs and carved timber struts",
+    "japan": "Japanese architecture with wooden temples and multi-tiered pagodas under sweeping curved tiled roofs",
+    "china": "Chinese architecture with timber halls under upturned glazed-tile eaves",
+    "vietnam": "Vietnamese architecture with sweeping tiled curved roofs and tiered Cham brick towers",
+    "laos": "Lao temple architecture with pointed that stupas and low tiered roofs",
+    "bhutan": "Bhutanese dzong architecture, fortress-monasteries with sloping whitewashed rammed-earth walls and timber galleries",
 }
 
 
 # Architecture cues keyed by distinctive words in the place's own Wikipedia text (checked BEFORE the country
-# fallback), so a Himalayan village is drawn as stacked timber houses, not a South Indian gopuram.
+# fallback), so a Himalayan village is drawn as stacked timber houses, not a South Indian gopuram. Positive
+# descriptions only (the named roof/material is what steers FLUX, not a "no ..." negative it would draw anyway).
 _ARCH_BY_KEYWORD = [
     (re.compile(r"kath[\s-]?kuni|cator and cribbage|himachal|kinnaur|spiti|kullu|parvati valley|himalay", re.I),
      "Himalayan kath-kuni architecture: stacked timber-and-stone houses with carved wooden balconies and "
-     "slate roofs, pine forests and snow peaks behind, no domes"),
+     "pitched slate roofs, pine forests and snow peaks behind"),
     (re.compile(r"\bstepwell|step well|\bbaori\b|\bbaoli\b|\bvav\b", re.I),
-     "Indian stepwell architecture: carved stone steps descending into an underground water tank, no domes"),
+     "Indian stepwell architecture: symmetrical carved stone steps descending into an underground water tank"),
     (re.compile(r"\bhaveli", re.I),
-     "Rajasthani haveli architecture: carved sandstone townhouses with jharokha balconies, no domes"),
+     "Rajasthani haveli architecture: carved sandstone townhouses with projecting jharokha balcony windows"),
     (re.compile(r"\bdzong\b", re.I),
-     "Bhutanese dzong architecture: fortress-monasteries with sloping whitewashed walls and timber galleries, no domes"),
+     "Bhutanese dzong architecture: fortress-monasteries with sloping whitewashed walls and timber galleries"),
     (re.compile(r"stilt house|longhouse|bamboo house|tribal village|thatched", re.I),
-     "timber-and-bamboo stilt houses with thatched roofs, no domes, no modern structures"),
+     "timber-and-bamboo stilt houses raised on posts with pitched thatched roofs"),
     (re.compile(r"\bhanok\b", re.I),
-     "Korean hanok architecture: timber houses with gently curved tiled roofs, no domes"),
+     "Korean hanok architecture: timber houses with gently curved tiled roofs"),
     (re.compile(r"rock[\s-]?cut|cave temple|monolith|caves?\b", re.I),
-     "Indian rock-cut cave architecture: pillared halls and shrines carved into living stone cliffs, no domes"),
+     "Indian rock-cut cave architecture: pillared halls and shrines carved into living stone cliffs"),
     (re.compile(r"\bminaret|\bmosque|\bmadrasa|\bcaravanserai|silk road", re.I),
-     "Central Asian Islamic architecture: tiled iwans, minarets and glazed blue domes typical of the region"),
+     "Central Asian Islamic architecture: tiled pointed iwans, slender minarets and glazed blue tilework"),
 ]
 
 
@@ -416,7 +430,7 @@ def _architecture_hint(place: str, country: str, article: str = "") -> str:
     for key, hint in _ARCHITECTURE.items():
         if re.search(rf"(?<![a-z]){re.escape(key)}(?![a-z])", blob):
             return hint
-    return "architecture authentic to this place and era, no domes unless the place is known for them, no modern structures"
+    return "traditional stone and timber architecture authentic to this place and era"
 
 
 # ------------------------------------------------------------------------------------------ selection
@@ -765,12 +779,17 @@ class Visuals:
         source = (getattr(s, "ai_scene_source", "") or "").strip().lower()
         if source in ("", "none", "off"):
             return None
+        # Never generate images of a deity or religious figure: fall back to a real photo of the temple/place
+        # and let the narration tell the myth as "legend says".
+        if _DEITY_RE.search(prompt or ""):
+            log.info("Scene %d: a deity/religious figure — using a real photo, not an AI image", idx + 1)
+            return None
         style = s.ai_scene_style or s.visual_style
-        arch = arch or "architecture authentic to the place and era, no modern structures"
-        # Architecture FIRST (so the model honours "no domes"); negatives include letterbox/black bars.
+        arch = arch or "traditional stone and timber architecture authentic to the place and era"
+        # Architecture leads (it anchors the look). Positive description only — FLUX draws whatever is named,
+        # so we ask for a full-bleed vertical frame rather than listing "no borders / no text" negatives.
         full = (f"{arch}. {prompt}. {style}. {_HISTORICAL_PERIOD}. "
-                "No text, no letters, no captions, no watermark, no modern logos or objects, "
-                "no black bars, no letterbox, no borders — the scene fills the entire vertical frame.")
+                "A full-bleed vertical 9:16 cinematic composition filling the entire frame edge to edge.")
         dest = dest_dir / f"scene{idx:02d}_ai.jpg"
         try:
             if source == "pollinations":

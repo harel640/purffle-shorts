@@ -164,6 +164,22 @@ def _future(iso: str | None) -> datetime | None:
     return t if t > datetime.now(timezone.utc) else None
 
 
+def plan_ai_scenes(historical: list[bool]) -> list[bool]:
+    """Which scenes get an AI illustration vs a real photo. The first and last scene are always real photos,
+    at most 5 scenes are AI, and at least ~40% of scenes are real. Extra AI scenes become real photos, dropped
+    from the end inward so the earliest story beats keep their illustration."""
+    hist = list(historical)
+    n = len(hist)
+    if n:
+        hist[0] = hist[-1] = False
+    allowed = min(5, n - (2 * n + 4) // 5)   # (2n+4)//5 == ceil(0.4 n): the real-photo floor
+    for i in range(n - 1, -1, -1):
+        if sum(hist) <= allowed:
+            break
+        hist[i] = False
+    return hist
+
+
 def final_title(script: Script, settings: Settings | None = None, text: str | None = None) -> str:
     t = script.title if text is None else text
     if settings is not None and not settings.vertical:
@@ -550,9 +566,14 @@ class Studio:
                     # illustration for scenes set in the past. All shots of a scene share its image (a new
                     # camera move each), so a historical scene is generated once, not per shot. AI past scenes
                     # are only for the "history" format; the "place" format is present-day, real photos only.
-                    hist_ok = script.style == "history"
-                    scene_jobs = [(sc.search_query, sc.image_prompt, bool(sc.historical) and hist_ok)
-                                  for sc in script.scenes]
+                    # AI past scenes only for the "history" style, and kept grounded: first & last scene real,
+                    # at least ~40% of scenes real, at most 5 AI scenes (see plan_ai_scenes).
+                    hist = plan_ai_scenes([bool(sc.historical) and script.style == "history"
+                                           for sc in script.scenes])
+                    scene_jobs = [(sc.search_query, sc.image_prompt, h) for sc, h in zip(script.scenes, hist)]
+                    if script.scenes:
+                        log.info("Scenes: %d total, %d AI, %d real photos (first & last real)",
+                                 len(hist), sum(hist), len(hist) - sum(hist))
                     coords = topics.place_coordinates(", ".join(x for x in (place, country) if x) or place,
                                                       s.language.split("-")[0])
                     if coords:

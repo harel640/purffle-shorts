@@ -97,6 +97,14 @@ def test_sensitive_region_blocks_by_resolved_place_not_article_mentions():
     assert safety.sensitive_region("Kashgar", "China") == "Xinjiang"
 
 
+def test_sensitive_region_covers_major_places_by_name():
+    # The check is now place+country only, so the region lists must name the major places themselves.
+    assert safety.sensitive_region("Mount Kailash", "China") == "Tibet"
+    assert safety.sensitive_region("Shigatse", "China") == "Tibet"
+    assert safety.sensitive_region("Turpan", "China") == "Xinjiang"
+    assert safety.sensitive_region("Urumqi", "China") == "Xinjiang"
+
+
 # --------------------------------------------------------------- title length (after fact-check rewrite)
 def test_final_title_caps_base_under_60_even_after_a_long_rewrite():
     from purffle_shorts.pipeline import final_title
