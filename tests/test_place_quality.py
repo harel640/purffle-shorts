@@ -363,11 +363,8 @@ def test_vision_available_detects_a_backend(monkeypatch):
 
 
 def test_fail_closed_skips_video_when_vision_unavailable(monkeypatch, tmp_path):
-    class _LLM:                                   # configured, but every call fails (down / out of quota)
-        def vision_available(self):
-            return True
-
-        def image_shows(self, path, subject):
+    class _LLM:                                   # a None/empty answer must be treated as unavailable, not a pass
+        def image_shows(self, path, subject):     # (no vision_available() -> still fails closed on None)
             return None
 
     v = Visuals(Settings(visual_sources=["wikimedia"]), llm=_LLM())
@@ -379,6 +376,25 @@ def test_fail_closed_skips_video_when_vision_unavailable(monkeypatch, tmp_path):
     with pytest.raises(SkipTopic, match="vision unavailable"):
         v.for_place_scenes([("temple", "", False)] * 3, "Gokarna", "India", tmp_path / "m",
                            min_images=5, lat=14.5, lon=74.3, title="Why does Gokarna temple hide a secret?")
+
+
+def test_verify_subject_none_is_unavailable_only_yes_is_a_pass():
+    def mk(answer):
+        class _L:
+            def image_shows(self, p, s):
+                return answer
+        it = _wimg("k", "Gokarna temple")
+        it.path = "k.jpg"                          # truthy so the check runs
+        return Visuals(Settings(), llm=_L()), it
+
+    v, it = mk(None)
+    assert v.verify_subject(it, "a temple") is None and v._vision_unavailable is True   # blank -> unavailable
+    v, it = mk("")
+    assert v.verify_subject(it, "a temple") is None and v._vision_unavailable is True   # empty -> unavailable
+    v, it = mk(True)
+    assert v.verify_subject(it, "a temple") is True and v._vision_unavailable is False  # only yes passes
+    v, it = mk(False)
+    assert v.verify_subject(it, "a temple") is False and v._vision_unavailable is False  # no rejects, not unavailable
 
 
 def test_neuron_budget_reserves_allocation_for_vision(tmp_path):

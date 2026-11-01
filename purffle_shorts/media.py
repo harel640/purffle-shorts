@@ -744,24 +744,33 @@ class Visuals:
 
     def verify_subject(self, item: MediaItem, subject: str) -> bool | None:
         """Ask the vision model whether the downloaded image actually shows ``subject`` (Commons titles lie).
-        Cached per (image, subject). Returns True/False, or None when no vision model is available."""
+        Cached per (image, subject). Only an explicit "yes" (True) is a pass; a "no" (False) rejects the image;
+        and a None/empty answer means the check could not be made — treated as UNAVAILABLE (fail closed), never
+        as a pass. Returns None only when the check is not expected (disabled, offline, or no image)."""
         if not subject or not getattr(self.s, "vision_check", True) or self.llm is None or not item.path:
-            return None
+            return None                                       # check not expected -> accept via ranking
         ck = (item.key, subject.lower())
         if ck in self._vision_cache:
-            return self._vision_cache[ck]
+            cached = self._vision_cache[ck]
+            if cached is None:                                # a cached 'unavailable' still fails the video closed
+                self._vision_unavailable = True
+            return cached
         try:
             verdict = self.llm.image_shows(item.path, subject)
         except Exception as e:
             log.debug("vision check errored (%s)", redact(e))
             verdict = None
-        self._vision_cache[ck] = verdict
+        if verdict is True:                                   # only an explicit "yes" is a pass
+            self._vision_cache[ck] = True
+            return True
         if verdict is False:
             log.info("Vision: %s does not show %r — rejected", item.extra.get("wiki_title") or item.key, subject)
-        elif verdict is None and getattr(self.llm, "vision_available", lambda: False)():
-            # A vision backend IS configured but gave no answer (down / out of quota): fail closed.
-            self._vision_unavailable = True
-        return verdict
+            self._vision_cache[ck] = False
+            return False
+        # None, empty, or any non-boolean answer: the check could not be made -> UNAVAILABLE (fail closed).
+        self._vision_cache[ck] = None
+        self._vision_unavailable = True
+        return None
 
     def _claim_wiki(self, cands: list[MediaItem], query: str, script_terms: set[str],
                     avoid: set[str] | None = None) -> MediaItem | None:
