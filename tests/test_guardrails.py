@@ -89,6 +89,27 @@ def test_sensitive_region_is_easy_to_extend(monkeypatch):
     assert safety.sensitive_region("A visit to Testville") == "Testland"
 
 
+def test_sensitive_region_blocks_by_resolved_place_not_article_mentions():
+    # The guard now runs on the RESOLVED place + country only, so a village merely NEAR a sensitive border
+    # is not blocked for the border being mentioned, while a place actually IN the region is.
+    assert safety.sensitive_region("Chitkul, Himachal Pradesh", "India") is None   # near the Tibet border, not in it
+    assert safety.sensitive_region("Lhasa", "China") == "Tibet"
+    assert safety.sensitive_region("Kashgar", "China") == "Xinjiang"
+
+
+# --------------------------------------------------------------- title length (after fact-check rewrite)
+def test_final_title_caps_base_under_60_even_after_a_long_rewrite():
+    from purffle_shorts.pipeline import final_title
+    long = "Why does Gokarna's ancient Shiva temple genuinely look like a giant stone cow's ear?"  # 84 chars
+    sc = Script(topic="Gokarna", title=long, hook_text="",
+                scenes=[Scene(narration="A temple shaped like an ear.", search_query="gokarna")],
+                description="d", tags=["gokarna"])
+    out = final_title(sc, Settings())                      # vertical Short -> base capped, then " #shorts"
+    assert out.endswith(" #shorts")
+    base = out[: -len(" #shorts")]
+    assert len(base) <= 60, f"{len(base)}: {base!r}"       # the fact-check rewrite no longer slips past the cap
+
+
 def test_safety_ignores_non_country(monkeypatch):
     called = []
     monkeypatch.setattr(safety, "advisories", lambda: called.append(1) or FEED)
