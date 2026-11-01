@@ -29,7 +29,7 @@ from pathlib import Path
 from . import ffmpeg
 from .config import Settings
 from .timing import Word, anchored_timings, estimate_timings, tokenize, transfer_timings
-from .utils import PermanentError, http, raise_for_status, with_retries
+from .utils import PermanentError, http, raise_for_status, run_with_timeout, with_retries
 
 log = logging.getLogger("purffle")
 
@@ -88,6 +88,14 @@ def _rate_multiplier(rate: str) -> float:
         return 1.0
 
 
+# edge-tts talks to Microsoft over a websocket. Its own connect/receive timeouts have failed to fire on
+# a half-open socket (the evening run froze here for hours), so each attempt also runs under a hard
+# wall-clock ceiling and we retry once. Keep the ceiling well under the launcher's docker-run watchdog.
+EDGE_CONNECT_TIMEOUT = 15   # seconds to open the websocket
+EDGE_RECEIVE_TIMEOUT = 30   # seconds to wait for each audio / word-boundary message
+EDGE_SYNTH_TIMEOUT = 120    # hard ceiling on one whole synthesis attempt
+
+
 # ------------------------------------------------------------------------------------------ engines
 def _edge(text: str, out: Path, settings: Settings) -> tuple[Path, list[Word], str]:
     try:
@@ -99,20 +107,29 @@ def _edge(text: str, out: Path, settings: Settings) -> tuple[Path, list[Word], s
 
     def _do():
         words: list[Word] = []
-        comm = edge_tts.Communicate(text, voice, rate=settings.tts_rate, boundary="WordBoundary",
-                                    receive_timeout=60)
-        with open(path, "wb") as f:
-            for chunk in comm.stream_sync():
-                if chunk["type"] == "audio":
-                    f.write(chunk["data"])
-                elif chunk["type"] == "WordBoundary":
-                    start = chunk["offset"] / 1e7
-                    words.append(Word(chunk["text"], start, start + chunk["duration"] / 1e7))
-        if path.stat().st_size == 0:
-            raise RuntimeError("edge-tts returned no audio")
+        # Each attempt writes its own temp file: a timed-out attempt's thread may still be writing, so
+        # the retry must not share the handle. Only a fully streamed file is moved into place.
+        tmp = out / f"voice.{threading.get_ident()}.part.mp3"
+        try:
+            comm = edge_tts.Communicate(text, voice, rate=settings.tts_rate, boundary="WordBoundary",
+                                        connect_timeout=EDGE_CONNECT_TIMEOUT, receive_timeout=EDGE_RECEIVE_TIMEOUT)
+            with open(tmp, "wb") as f:
+                for chunk in comm.stream_sync():
+                    if chunk["type"] == "audio":
+                        f.write(chunk["data"])
+                    elif chunk["type"] == "WordBoundary":
+                        start = chunk["offset"] / 1e7
+                        words.append(Word(chunk["text"], start, start + chunk["duration"] / 1e7))
+            if tmp.stat().st_size == 0:
+                raise RuntimeError("edge-tts returned no audio")
+            os.replace(tmp, path)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
         return words
 
-    words = with_retries(_do, attempts=3, label=f"edge-tts {voice}")
+    words = with_retries(lambda: run_with_timeout(_do, EDGE_SYNTH_TIMEOUT, f"edge-tts {voice}"),
+                         attempts=2, label=f"edge-tts {voice}")
     return path, words, voice
 
 

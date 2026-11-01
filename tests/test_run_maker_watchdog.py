@@ -1,0 +1,32 @@
+"""Guards the scheduler's docker-run watchdog in ops/run-maker.ps1. The script lives outside this
+repo (it's deployment, in two copies), so this runs on the machine that has them and skips elsewhere
+(e.g. inside the test container). It checks the watchdog is present and the two copies haven't drifted."""
+
+import hashlib
+from pathlib import Path
+
+import pytest
+
+_OPS = [
+    Path.home() / "purffle-testrun" / "ops" / "run-maker.ps1",
+    Path.home() / "OneDrive" / "שולחן העבודה" / "shorts-scout" / "ops" / "run-maker.ps1",
+]
+
+
+def _present():
+    return [p for p in _OPS if p.exists()]
+
+
+@pytest.mark.skipif(not _present(), reason="run-maker.ps1 ops copies not on this machine")
+def test_watchdog_present_and_copies_in_sync():
+    copies = _present()
+    for p in copies:
+        text = p.read_text(encoding="utf-8")
+        assert "MaxRunMinutes = 25" in text                 # 25-minute hard ceiling
+        assert "WaitForExit($MaxRunMinutes" in text          # bounded wait on the container
+        assert "docker kill" in text                         # kill the container on overrun
+        assert "TIMEOUT" in text                             # recorded in the daily summary
+        assert "retrying once" in text                       # and retried once
+    if len(copies) == 2:
+        digests = {hashlib.sha256(p.read_bytes()).hexdigest() for p in copies}
+        assert len(digests) == 1, "the two run-maker.ps1 copies have drifted apart"
