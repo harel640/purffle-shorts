@@ -72,6 +72,78 @@ def article(query: str, lang: str = "en", max_chars: int = 5000) -> tuple[str, s
         return "", ""
 
 
+def place_coordinates(query: str, lang: str = "en") -> tuple[float, float] | None:
+    """(lat, lon) of the best-matching Wikipedia article for ``query`` (free API, no key), so Commons images
+    can be found by geography rather than by name alone. Returns None on any failure."""
+    try:
+        r = http().get(f"https://{lang}.wikipedia.org/w/api.php", timeout=20, params={
+            "action": "query", "format": "json", "redirects": 1,
+            "generator": "search", "gsrsearch": query, "gsrlimit": 1, "gsrnamespace": 0,
+            "prop": "coordinates", "colimit": 1})
+        raise_for_status(r, "Wikipedia coordinates")
+        pages = (r.json().get("query") or {}).get("pages") or {}
+        page = next(iter(pages.values()), None) if isinstance(pages, dict) else (pages[0] if pages else None)
+        co = ((page or {}).get("coordinates") or [{}])[0]
+        if "lat" in co and "lon" in co:
+            return float(co["lat"]), float(co["lon"])
+    except Exception as e:
+        log.warning("Wikipedia coordinates for %r failed: %s", query, e)
+    return None
+
+
+# This channel is hidden natural + historic places only. Skip modern attractions: zoos, theme parks, malls,
+# resorts, hotels and the like — recognised by name OR by the article's own description.
+_ATTRACTION_RE = re.compile(
+    r"\b(zoo|safari park|wildlife park|theme park|amusement park|water ?park|aqua ?park|fun ?fair|"
+    r"aquarium|oceanarium|marine park|bird park|dolphinarium|"
+    r"shopping (?:mall|centre|center|complex)|outlet (?:mall|village)|retail park|"
+    r"resort|hotel|casino|golf course|holiday park|caravan park|"
+    r"stadium|convention (?:centre|center)|observation (?:deck|tower|wheel)|ferris wheel)\b", re.I)
+_MALL_RE = re.compile(r"(?<![a-z])malls?(?![a-z])", re.I)
+# "opened/founded/built in YYYY" — used to reject attractions whose only recorded date is after 1950.
+_OPEN_YEAR_RE = re.compile(
+    r"\b(?:open(?:ed|ing)?|inaugurat\w*|establish\w*|founded|built|constructed|completed|commissioned)\b"
+    r"[^.]{0,40}?\b(1\d{3}|20\d{2})\b", re.I)
+
+
+def modern_attraction_reason(subject: str, article: str = "") -> str:
+    """Why ``subject`` is a modern attraction rather than a hidden natural/historic place — or "" if it is
+    fine. Matches zoos / theme parks / malls / resorts / hotels (by name or by the article's description), and
+    any place whose only recorded opening or founding year is after 1950."""
+    blob = f"{subject}\n{article}"
+    m = _ATTRACTION_RE.search(blob) or _MALL_RE.search(blob)
+    if m:
+        return f"looks like a {m.group(0).strip().lower()}"
+    years = [int(y) for y in _OPEN_YEAR_RE.findall(article)]
+    if years and min(years) > 1950:
+        return f"opened {min(years)} (after 1950)"
+    return ""
+
+
+_OLD_CENTURY_RE = re.compile(r"\b(\d{1,2})(?:st|nd|rd|th)[- ]century\b", re.I)
+_BCE_RE = re.compile(r"\b(?:BCE?|B\.C\.?E?\.?)\b")
+_OLD_ERA_RE = re.compile(
+    r"\b(ancient|medieval|mediaeval|prehistoric|dynasty|dynasties|empire|kingdom|sultanate|caliphate|"
+    r"antiquity|Iron Age|Bronze Age|Neolithic|Palaeolithic|Paleolithic|centuries[- ]old|millennia[- ]old)\b",
+    re.I)
+# A dated event in the past: "in 1565", "founded c. 850", "AD 1200" — a real year, so false positives like
+# "1,200 metres" (comma) or a bare measurement don't count as history.
+_OLD_DATE_RE = re.compile(r"\b(?:in|since|by|around|about|circa|c\.?|AD)\s+(\d{3,4})\b", re.I)
+
+
+def has_real_history(article: str) -> bool:
+    """True when the Wikipedia text records real events before ~1900 — a BCE date, an early century, a dated
+    pre-1900 event, or an unambiguous historical era. This gates the AI-illustrated ``history`` format; places
+    without such a record get the present-day ``place`` format (real photos only)."""
+    if not article:
+        return False
+    if _BCE_RE.search(article) or _OLD_ERA_RE.search(article):
+        return True
+    if any(int(y) < 1900 for y in _OLD_DATE_RE.findall(article)):
+        return True
+    return any(int(c) <= 19 for c in _OLD_CENTURY_RE.findall(article))
+
+
 def _weighted_sources(settings: Settings) -> list[tuple[str, float]]:
     out = []
     for item in settings.topic_sources or ["niche"]:

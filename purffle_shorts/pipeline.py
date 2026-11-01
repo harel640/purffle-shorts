@@ -31,6 +31,7 @@ from .script import (
     DEFAULT_CAST,
     LANGUAGES,
     MULTI_SPEAKER,
+    STORY_STYLES,
     STYLES,
     Script,
     load_script,
@@ -355,9 +356,29 @@ class Studio:
             self._step("script", pick.subject)
             insights = analytics.insights(self.history) if s.learn_from_stats else ""
             style = style or pick.style or None
-            # Place-locked channels (Wikimedia visuals) are story-driven by default: every topic is a real place.
-            if not style and s.style not in STYLES and "wikimedia" in [x.lower() for x in s.visual_sources]:
-                style = "history"
+            place_locked_channel = "wikimedia" in [x.lower() for x in s.visual_sources]
+            user_chose_topic = pick.source in ("manual", "url", "document", "script", "clip")
+            # Ground the story in the place's real Wikipedia article FIRST: it decides history-vs-place style,
+            # gates out modern attractions, and every factual claim the writer makes must come from it.
+            if (self.llm is not None and not s.offline and not pick.source_text
+                    and (style == "history" or place_locked_channel)):
+                text, url = topics.article(pick.subject, s.language.split("-")[0])
+                if text:
+                    pick.source_text, pick.source_url = text, url
+                    pick.context = (pick.context + "\n\n" + text).strip() if pick.context else text
+                    log.info("Grounded in Wikipedia: %s (%d chars)", url, len(text))
+            # Hidden natural + historic places only: skip zoos, theme parks, malls, resorts, hotels and anything
+            # opened after 1950 (recognised by name or by the article's own description).
+            if place_locked_channel and not user_chose_topic:
+                reason = topics.modern_attraction_reason(pick.subject, pick.source_text)
+                if reason:
+                    raise SkipTopic(f"not a hidden natural/historic place: {reason}")
+            # Place-locked channels are story-driven: the AI-illustrated "history" format only when the article
+            # records real pre-1900 history; otherwise a present-day "place" story with real photos only.
+            if not style and s.style not in STYLES and place_locked_channel:
+                style = "history" if topics.has_real_history(pick.source_text) else "place"
+                log.info("Style: %s (%s pre-1900 history in the article)",
+                         style, "found" if style == "history" else "no")
             if (not style and s.learn_from_stats and s.style not in STYLES
                     and pick.source not in ("trending", "wikipedia", "reddit", "rss", "url", "document")):
                 style = analytics.choose_style(self.history, sorted(set(AUTO_STYLES)))
@@ -367,14 +388,6 @@ class Studio:
                 pick.keywords = seo.search_phrases(pick.subject, s.language, s.trends_geo)
                 if pick.keywords:
                     log.info("YouTube searches: %s", "; ".join(pick.keywords[:4]))
-            # Ground a story in the place's real Wikipedia article: the writer must draw every fact from it.
-            if (self.llm is not None and not s.offline and not pick.source_text
-                    and (style == "history" or "wikimedia" in [x.lower() for x in s.visual_sources])):
-                text, url = topics.article(pick.subject, s.language.split("-")[0])
-                if text:
-                    pick.source_text, pick.source_url = text, url
-                    pick.context = (pick.context + "\n\n" + text).strip() if pick.context else text
-                    log.info("Grounded in Wikipedia: %s (%d chars)", url, len(text))
             script = write_script(self.llm, pick.subject, s, source=pick.source, avoid=self.history.recent_titles(),
                                   context=pick.context, style=style, insights=insights,
                                   keywords=seo.keywords_block(pick.keywords))
@@ -530,10 +543,19 @@ class Studio:
                 if place_locked and place:
                     # Hybrid, one image per scene: a real Wikimedia photo of the place today, or an AI
                     # illustration for scenes set in the past. All shots of a scene share its image (a new
-                    # camera move each), so a historical scene is generated once, not per shot.
-                    scene_jobs = [(sc.search_query, sc.image_prompt, bool(sc.historical)) for sc in script.scenes]
-                    per_scene = visuals.for_place_scenes(scene_jobs, place, country, work / "media",
-                                                         progress=self._sub, min_images=s.min_place_images)
+                    # camera move each), so a historical scene is generated once, not per shot. AI past scenes
+                    # are only for the "history" format; the "place" format is present-day, real photos only.
+                    hist_ok = script.style == "history"
+                    scene_jobs = [(sc.search_query, sc.image_prompt, bool(sc.historical) and hist_ok)
+                                  for sc in script.scenes]
+                    coords = topics.place_coordinates(", ".join(x for x in (place, country) if x) or place,
+                                                      s.language.split("-")[0])
+                    if coords:
+                        log.info("Coordinates: %.4f, %.4f (Commons images within 5 km)", *coords)
+                    per_scene = visuals.for_place_scenes(
+                        scene_jobs, place, country, work / "media", progress=self._sub,
+                        min_images=s.min_place_images, lat=coords[0] if coords else None,
+                        lon=coords[1] if coords else None, article=pick.source_text)
                     media = [per_scene[st.index] for st in shots]
                 else:
                     # AI images cost money or are rate-limited: the extra shots of a scene reuse its picture with
@@ -568,8 +590,8 @@ class Studio:
             for k, (sc, tm) in enumerate(zip(script.scenes, timeline)):
                 if sc.emoji and not chat and not (card and k == 0):
                     emoji.append((tm.start + 0.05, min(tm.end, tm.start + 1.65), sc.emoji))
-            # History videos end on a calm payoff, so no "Follow for more!" end-card is burned in.
-            ov = replace(s, end_cta="") if script.style == "history" else s
+            # Story videos (history/place) end on a calm payoff, so no "Follow for more!" end-card is burned in.
+            ov = replace(s, end_cta="") if script.style in STORY_STYLES else s
             plan = build_overlays(ov, on_screen, total, script.hook_text, work, labels=labels, chat=messages,
                                   contact=script.speaker_name("A"), card=card, card_until=card_until,
                                   emphasis={k for sc in script.scenes for k in sc.emphasis}, emoji=emoji)
