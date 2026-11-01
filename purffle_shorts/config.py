@@ -151,6 +151,10 @@ class Settings:
                            "depth, consistent art direction, full-frame vertical 9:16 composition")
     cloudflare_account_id: str = ""   # Cloudflare Workers AI (free tier) account id, for ai_scene_source=cloudflare
     cloudflare_api_token: str = ""     # Cloudflare Workers AI API token (a secret, never logged)
+    # Before a real photo is used, a free vision model is asked "does this clearly show <subject>?" and the
+    # photo is rejected on "no" — Commons titles lie (a "temple" file may be a dirt road or a monkey).
+    vision_check: bool = True
+    vision_model: str = ""            # override the vision model; else Groq Llama-4-Scout, then Gemini
     prefer_4k: bool = False
     background_video: str = ""        # a video file or folder (gameplay, satisfying clips) played under stories
     background_layout: str = "full"   # full = the background is the picture; split = footage on top, it below
@@ -334,6 +338,8 @@ class Settings:
             ai_scene_style=_env("AI_SCENE_STYLE", d.ai_scene_style),
             cloudflare_account_id=_env("CLOUDFLARE_ACCOUNT_ID"),
             cloudflare_api_token=_env("CLOUDFLARE_API_TOKEN"),
+            vision_check=_bool(_env("VISION_CHECK", "true")),
+            vision_model=_env("VISION_MODEL"),
             prefer_4k=_bool(_env("PREFER_4K", "false")),
             background_video=_env("BACKGROUND_VIDEO"),
             background_layout=_env("BACKGROUND_LAYOUT", d.background_layout).lower(),

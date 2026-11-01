@@ -560,7 +560,7 @@ class Studio:
             else:
                 # split layout: the footage fills the top half, so search for the shape of that half
                 visuals = Visuals(replace(s, resolution=split_sizes(s)[0]) if split else s,
-                                  self.history.used_media())
+                                  self.history.used_media(), llm=self.llm)
                 if place_locked and place:
                     # Hybrid, one image per scene: a real Wikimedia photo of the place today, or an AI
                     # illustration for scenes set in the past. All shots of a scene share its image (a new
