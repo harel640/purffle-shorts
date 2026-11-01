@@ -18,6 +18,34 @@ class R:
         self.status_code, self.content, self.text = 200, content, ""
 
 
+def test_article_grounding_returns_text_and_url(monkeypatch):
+    data = {"query": {"pages": {"123": {"title": "Hampi",
+            "extract": "Hampi is a temple town in Karnataka, India, once the capital of Vijayanagara."}}}}
+
+    class Resp:
+        status_code, text = 200, ""
+
+        def json(self):
+            return data
+
+    class S:
+        def get(self, *a, **k):
+            return Resp()
+
+    monkeypatch.setattr(T, "http", lambda: S())
+    text, url = T.article("Hampi India")
+    assert "temple town" in text and url == "https://en.wikipedia.org/wiki/Hampi"
+
+
+def test_article_grounding_fails_open(monkeypatch):
+    class S:
+        def get(self, *a, **k):
+            raise RuntimeError("network down")
+
+    monkeypatch.setattr(T, "http", lambda: S())
+    assert T.article("Hampi") == ("", "")
+
+
 def _fake(monkeypatch, content):
     class S:
         def get(self, *a, **k):

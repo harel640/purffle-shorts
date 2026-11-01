@@ -133,7 +133,7 @@ def test_place_scenes_skips_near_blank_image(settings, monkeypatch, tmp_path):
         return calls["n"] == 1          # only the first fetched image is near-blank
 
     monkeypatch.setattr(M, "_low_quality_image", fake_lowq)
-    out = v.for_place_scenes([("landmark", "", 3.0)], "Mrauk U", "Myanmar", tmp_path / "m", min_images=5)
+    out = v.for_place_scenes([("landmark", "", False)], "Mrauk U", "Myanmar", tmp_path / "m", min_images=5)
     assert len(out) == 1 and out[0].source == "wikimedia" and calls["n"] >= 2   # rejected one, took the next
 
 
@@ -149,7 +149,7 @@ def test_wiki_rank_prefers_landmark_portrait_highres_over_generic():
 def test_place_scenes_skips_when_too_few_images(settings, monkeypatch, tmp_path):
     pool = [_wiki_item(i, f"Mrauk U temple {i}") for i in range(3)]        # only 3 < 5
     v = _visuals(settings, monkeypatch, pool)
-    jobs = [("temple", "", 3.0), ("river", "", 3.0)]
+    jobs = [("temple", "", False), ("river", "", False)]
     with pytest.raises(SkipTopic):
         v.for_place_scenes(jobs, "Mrauk U", "Myanmar", tmp_path / "m", min_images=5)
 
@@ -158,12 +158,85 @@ def test_place_scenes_assigns_and_credits(settings, monkeypatch, tmp_path):
     pool = [_wiki_item(i, f"Mrauk U {name}") for i, name in
             enumerate(["Shittaung Pagoda", "Kaladan River", "Mahamuni", "bamboo boat", "sunrise temple", "skyline"])]
     v = _visuals(settings, monkeypatch, pool)
-    jobs = [("Shittaung Pagoda", "", 3.0), ("Kaladan River", "", 3.0), ("bamboo boat", "", 3.0)]
+    jobs = [("Shittaung Pagoda", "", False), ("Kaladan River", "", False), ("bamboo boat", "", False)]
     out = v.for_place_scenes(jobs, "Mrauk U", "Myanmar", tmp_path / "m", min_images=5)
     assert len(out) == 3 and all(m.source == "wikimedia" and m.path for m in out)
     assert out[0].text.lower().find("shittaung") >= 0          # best match goes to the matching scene
     assert "Wikimedia Commons" in v.credits
     assert len(v.image_credits) == 3 and all(c["author"] and c["license"] for c in v.image_credits)
+
+
+# --------------------------------------------------------------- hybrid: Wikimedia today + AI for the past
+def test_place_scenes_hybrid_routes_historical_to_ai(settings, monkeypatch, tmp_path):
+    settings.ai_scene_source = "pollinations"
+    pool = [_wiki_item(i, f"Mrauk U temple {i}") for i in range(6)]
+    v = _visuals(settings, monkeypatch, pool)
+
+    def fake_ai(prompt, dest_dir, idx, arch=""):
+        v.ai_used = True
+        return MediaItem("pollinations", f"ai{idx}", "image", path=dest_dir / f"ai{idx}.jpg",
+                         width=1080, height=1920, query=prompt)
+
+    monkeypatch.setattr(v, "_historical_image", fake_ai)
+    jobs = [("Mrauk U skyline today", "", False), ("a king's court long ago", "royal court", True)]
+    out = v.for_place_scenes(jobs, "Mrauk U", "Myanmar", tmp_path / "m", min_images=5)
+    assert out[0].source == "wikimedia" and out[1].source == "pollinations"   # today -> photo, past -> AI
+    assert v.ai_used is True
+    assert len(v.image_credits) == 1 and v.image_credits[0]["author"].startswith("Author")  # AI isn't credited
+
+
+def test_place_scenes_falls_back_to_photo_when_ai_fails(settings, monkeypatch, tmp_path):
+    pool = [_wiki_item(i, f"Mrauk U temple {i}") for i in range(6)]
+    v = _visuals(settings, monkeypatch, pool)
+    monkeypatch.setattr(v, "_historical_image", lambda *a, **k: None)      # AI unavailable / failed
+    out = v.for_place_scenes([("a king long ago", "royal court", True)], "Mrauk U", "Myanmar",
+                             tmp_path / "m", min_images=5)
+    assert len(out) == 1 and out[0].source == "wikimedia" and v.ai_used is False
+
+
+def test_wiki_rank_avoids_panoramas():
+    terms = M._terms("Hampi Vittala temple")
+    normal = MediaItem("wikimedia", "1", "image", width=1200, height=1600, text="Hampi Vittala temple")
+    pano = MediaItem("wikimedia", "2", "image", width=4200, height=1200, text="Hampi Vittala temple panorama")
+    assert M._wiki_rank(normal, "temple", terms) > M._wiki_rank(pano, "temple", terms)
+
+
+def test_wiki_rank_prefers_a_fresh_subject():
+    terms = M._terms("Hampi")
+    shot = MediaItem("wikimedia", "1", "image", width=1200, height=1600, text="Hampi elephant stables")
+    avoid = M._terms("elephant stables")        # this subject already appeared earlier in the video
+    assert M._wiki_rank(shot, "stables", terms) > M._wiki_rank(shot, "stables", terms, avoid)
+
+
+def test_place_scenes_never_repeats_an_image(settings, monkeypatch, tmp_path):
+    pool = [_wiki_item(i, f"Hampi subject {i}") for i in range(6)]
+    v = _visuals(settings, monkeypatch, pool)
+    jobs = [("Hampi a", "", False), ("Hampi b", "", False), ("Hampi c", "", False), ("Hampi d", "", False)]
+    out = v.for_place_scenes(jobs, "Hampi", "India", tmp_path / "m", min_images=5)
+    keys = [m.key for m in out]
+    assert len(set(keys)) == len(keys) == 4   # each scene gets a distinct image, none reused
+
+
+def test_architecture_hint_depends_on_place():
+    assert "gopuram" in M._architecture_hint("Hampi", "India").lower()
+    assert "khmer" in M._architecture_hint("Angkor Wat", "Cambodia").lower()
+    assert "burmese" in M._architecture_hint("Bagan", "Myanmar").lower()
+    neutral = M._architecture_hint("Some Place", "Narnia")       # unknown -> neutral, non-anachronistic cue
+    assert "gopuram" not in neutral.lower() and "modern" in neutral.lower()
+
+
+def test_cloudflare_image_decodes_base64(tmp_path, monkeypatch):
+    import base64 as _b64
+
+    class Poster:
+        def post(self, url, json=None, headers=None, timeout=None):
+            return R({"result": {"image": _b64.b64encode(b"\x89PNG fake-image-bytes padding").decode()},
+                      "success": True})
+
+    monkeypatch.setattr(M, "http", lambda: Poster())
+    dest = tmp_path / "cf.jpg"
+    out = M.cloudflare_image("a palace at dawn", dest, "acct123", "token123")
+    assert out == dest and dest.read_bytes().startswith(b"\x89PNG")
 
 
 # --------------------------------------------------------------- stock video fallback is place-gated

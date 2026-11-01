@@ -45,8 +45,10 @@ from .utils import Cancelled, check_cancel, redact, slugify, truncate_words
 log = logging.getLogger("purffle")
 
 END_PAD = 0.6          # seconds of breathing room after the last word
-REUSABLE_SOURCES = {"generated", "local", "background", "openai-images", "ai", "dalle", "gpt-image", "pollinations"}
-AI_SOURCES = {"openai-images", "ai", "dalle", "gpt-image", "pollinations"}
+AI_SOURCES = {"openai-images", "ai", "dalle", "gpt-image", "pollinations", "cloudflare", "gemini", "nano-banana"}
+REUSABLE_SOURCES = {"generated", "local", "background"} | AI_SOURCES
+# Added to the description (and the YouTube synthetic-content disclosure is set) whenever a video uses AI images.
+AI_DISCLOSURE = "Some scenes are AI illustrations."
 
 # Rough share of the work done when each stage starts (for progress bars before any timing is learned).
 STAGES = {"topic": 2, "script": 8, "review": 20, "voice": 32, "footage": 45, "captions": 62, "render": 72,
@@ -330,6 +332,9 @@ class Studio:
             self._step("script", pick.subject)
             insights = analytics.insights(self.history) if s.learn_from_stats else ""
             style = style or pick.style or None
+            # Place-locked channels (Wikimedia visuals) are story-driven by default: every topic is a real place.
+            if not style and s.style not in STYLES and "wikimedia" in [x.lower() for x in s.visual_sources]:
+                style = "history"
             if (not style and s.learn_from_stats and s.style not in STYLES
                     and pick.source not in ("trending", "wikipedia", "reddit", "rss", "url", "document")):
                 style = analytics.choose_style(self.history, sorted(set(AUTO_STYLES)))
@@ -339,6 +344,14 @@ class Studio:
                 pick.keywords = seo.search_phrases(pick.subject, s.language, s.trends_geo)
                 if pick.keywords:
                     log.info("YouTube searches: %s", "; ".join(pick.keywords[:4]))
+            # Ground a story in the place's real Wikipedia article: the writer must draw every fact from it.
+            if (self.llm is not None and not s.offline and not pick.source_text
+                    and (style == "history" or "wikimedia" in [x.lower() for x in s.visual_sources])):
+                text, url = topics.article(pick.subject, s.language.split("-")[0])
+                if text:
+                    pick.source_text, pick.source_url = text, url
+                    pick.context = (pick.context + "\n\n" + text).strip() if pick.context else text
+                    log.info("Grounded in Wikipedia: %s (%d chars)", url, len(text))
             script = write_script(self.llm, pick.subject, s, source=pick.source, avoid=self.history.recent_titles(),
                                   context=pick.context, style=style, insights=insights,
                                   keywords=seo.keywords_block(pick.keywords))
@@ -347,6 +360,7 @@ class Studio:
                 script = review_script(self.llm, script, s)
             if self.llm is not None and not s.offline and s.fact_check:
                 script = factcheck.scrub(self.llm, script, s)
+                script = factcheck.ground(script, pick.source_text, s)   # drop any invented specifics
         except BaseException:
             if pick.idea_id:
                 self.history.release_idea(pick.idea_id)
@@ -482,22 +496,27 @@ class Studio:
                 media = _media_for(shots, media_map)
                 credits = set(credits or ())
             else:
-                # AI images cost money or are rate-limited: the extra shots of a scene reuse its picture with a
-                # new camera move instead of asking for another one.
-                ai_first = bool(s.visual_sources) and s.visual_sources[0] in AI_SOURCES
-                wanted = [st for st in shots if st.part == 0 or not ai_first]
-                jobs = [(script.scenes[st.index].search_query, script.scenes[st.index].image_prompt,
-                         st.duration + T) for st in wanted]
                 # split layout: the footage fills the top half, so search for the shape of that half
                 visuals = Visuals(replace(s, resolution=split_sizes(s)[0]) if split else s,
                                   self.history.used_media())
                 if place_locked and place:
-                    scene_media = visuals.for_place_scenes(jobs, place, country, work / "media",
-                                                           progress=self._sub, min_images=s.min_place_images)
+                    # Hybrid, one image per scene: a real Wikimedia photo of the place today, or an AI
+                    # illustration for scenes set in the past. All shots of a scene share its image (a new
+                    # camera move each), so a historical scene is generated once, not per shot.
+                    scene_jobs = [(sc.search_query, sc.image_prompt, bool(sc.historical)) for sc in script.scenes]
+                    per_scene = visuals.for_place_scenes(scene_jobs, place, country, work / "media",
+                                                         progress=self._sub, min_images=s.min_place_images)
+                    media = [per_scene[st.index] for st in shots]
                 else:
+                    # AI images cost money or are rate-limited: the extra shots of a scene reuse its picture with
+                    # a new camera move instead of asking for another one.
+                    ai_first = bool(s.visual_sources) and s.visual_sources[0] in AI_SOURCES
+                    wanted = [st for st in shots if st.part == 0 or not ai_first]
+                    jobs = [(script.scenes[st.index].search_query, script.scenes[st.index].image_prompt,
+                             st.duration + T) for st in wanted]
                     scene_media = visuals.for_scenes(jobs, script.topic, work / "media", progress=self._sub)
-                got = dict(zip(((st.index, st.part) for st in wanted), scene_media))
-                media = [got.get((st.index, st.part)) or got[(st.index, 0)] for st in shots]
+                    got = dict(zip(((st.index, st.part) for st in wanted), scene_media))
+                    media = [got.get((st.index, st.part)) or got[(st.index, 0)] for st in shots]
                 credits = visuals.credits
                 image_credits = visuals.image_credits
             by_scene = {(st.index, st.part): m for st, m in zip(shots, media)}
@@ -521,7 +540,9 @@ class Studio:
             for k, (sc, tm) in enumerate(zip(script.scenes, timeline)):
                 if sc.emoji and not chat and not (card and k == 0):
                     emoji.append((tm.start + 0.05, min(tm.end, tm.start + 1.65), sc.emoji))
-            plan = build_overlays(s, on_screen, total, script.hook_text, work, labels=labels, chat=messages,
+            # History videos end on a calm payoff, so no "Follow for more!" end-card is burned in.
+            ov = replace(s, end_cta="") if script.style == "history" else s
+            plan = build_overlays(ov, on_screen, total, script.hook_text, work, labels=labels, chat=messages,
                                   contact=script.speaker_name("A"), card=card, card_until=card_until,
                                   emphasis={k for sc in script.scenes for k in sc.emphasis}, emoji=emoji)
 
@@ -542,9 +563,15 @@ class Studio:
                                   until=card_until or plan.hook_until or min(2.8, total * 0.4))
             (folder / "captions.srt").write_text(srt(chunks), encoding="utf-8")
 
+            # YouTube's synthetic-content disclosure and the description line go on only when AI images were used.
+            used_ai = s.synthetic_media and any(m is not None and m.source in AI_SOURCES for m in media)
             title = final_title(script, s)
             credit_block = image_credits_block(image_credits) if s.credit_footage else ""
             extra = ([credit_block] if credit_block else []) + ([EMOJI_CREDIT] if plan.emoji and s.credit_footage else [])
+            if used_ai:
+                extra.append(AI_DISCLOSURE)
+            if pick.source_url:
+                extra.append(f"Source: {pick.source_url}")
             description = final_description(script, credits, s, extra=extra)
             localizations = {}
             wanted = [x for x in s.localize_metadata if x != s.language]
@@ -570,6 +597,8 @@ class Studio:
                 "voice": f"{speech.engine}:{speech.voice}", "timing": speech.timing,
                 "visuals": [{"source": m.source, "id": m.id, "kind": m.kind, "query": m.query}
                             for m in media + ([background] if split else [])],
+                "synthetic_media": used_ai,
+                "source_url": pick.source_url,
                 "parent_id": parent_id, "created_at": now_iso(),
             }
             (folder / "metadata.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -717,7 +746,8 @@ class Studio:
         body = youtube.build_body(self.s, rec["title"], rec["description"] or "",
                                   json.loads(rec["tags"] or "[]"), meta.get("category_id", "27"),
                                   meta.get("language", self.s.language), publish,
-                                  localizations=meta.get("localizations"))
+                                  localizations=meta.get("localizations"),
+                                  synthetic=meta.get("synthetic_media"))
         try:
             resp = youtube.upload(self.s, Path(rec["video_path"]), body)
         except youtube.QuotaExceeded:

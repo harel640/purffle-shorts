@@ -177,13 +177,15 @@ def to_rfc3339(dt: datetime) -> str:
 
 def build_body(settings: Settings, title: str, description: str, tags: list[str], category_id: str,
                language: str, publish_at: datetime | None = None,
-               localizations: dict[str, dict] | None = None) -> dict:
+               localizations: dict[str, dict] | None = None, synthetic: bool | None = None) -> dict:
     status = {
         "privacyStatus": "private" if publish_at else settings.privacy,
         "selfDeclaredMadeForKids": settings.made_for_kids,
         "embeddable": True,
     }
-    if settings.synthetic_media:
+    # Disclose altered/synthetic content only when this video actually used AI images. ``synthetic`` is the
+    # per-video decision (None for callers that don't track it -> fall back to the SYNTHETIC_MEDIA switch).
+    if settings.synthetic_media if synthetic is None else synthetic:
         status["containsSyntheticMedia"] = True
     if publish_at:
         status["publishAt"] = to_rfc3339(publish_at)

@@ -312,6 +312,56 @@ def pollinations_image(prompt: str, dest: Path, width: int, height: int, key: st
         return download(url, dest, headers=headers, timeout=180, max_bytes=30 * 1024 * 1024)
 
 
+def cloudflare_image(prompt: str, dest: Path, account_id: str, token: str, steps: int = 6) -> Path:
+    """Cloudflare Workers AI running FLUX.1 [schnell] (Apache-2.0 model, commercial use allowed). The free
+    tier gives a daily allocation of 'neurons' — enough for dozens of images a day at no cost."""
+    url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/@cf/black-forest-labs/flux-1-schnell"
+
+    def _do():
+        r = http().post(url, json={"prompt": prompt[:2048], "steps": max(1, min(8, steps))}, timeout=120,
+                        headers={"Authorization": f"Bearer {token}"})
+        raise_for_status(r, "Cloudflare Workers AI")
+        b64 = ((r.json().get("result") or {}).get("image")) or ""
+        if not b64:
+            raise PermanentError(f"Cloudflare Workers AI returned no image: {str(r.text)[:160]}")
+        dest.write_bytes(base64.b64decode(b64))
+        return dest
+
+    return with_retries(_do, attempts=2, label="Cloudflare image")
+
+
+# Period discipline for every historical AI illustration (keeps anachronisms out).
+_HISTORICAL_PERIOD = "period-accurate, no modern clothing, no backpacks or modern objects"
+
+# Architecture cue per place, so a past scene is drawn in the style of THAT place rather than one hardcoded
+# look. Keyed by country (or a distinctive place keyword); extend by adding an entry.
+_ARCHITECTURE = {
+    "india": "South Indian stone temple architecture (gopurams, pillared mandapas); no domes unless the place has them",
+    "myanmar": "Burmese temple architecture (gilded stupas, zedi spires)",
+    "burma": "Burmese temple architecture (gilded stupas, zedi spires)",
+    "thailand": "Thai temple architecture (chedi stupas, tiered gilded roofs)",
+    "cambodia": "Khmer temple architecture (laterite and sandstone prangs, Angkor style)",
+    "indonesia": "Indonesian candi architecture (stepped stone terraces, Borobudur/Prambanan style)",
+    "sri lanka": "Sinhalese architecture (dagoba stupas, carved stone pillars)",
+    "nepal": "Newar pagoda architecture (tiered wooden roofs, carved struts)",
+    "japan": "Japanese architecture (wooden temples and pagodas, curved tiled roofs)",
+    "china": "Chinese architecture (timber halls, upturned tiled eaves)",
+    "vietnam": "Vietnamese architecture (tiled curved roofs, Cham brick towers where apt)",
+    "laos": "Lao temple architecture (that stupas, tiered roofs)",
+    "bhutan": "Bhutanese dzong architecture (fortress-monasteries, sloping whitewashed walls)",
+}
+
+
+def _architecture_hint(place: str, country: str) -> str:
+    """A place-appropriate architecture cue for AI illustrations, so a Khmer ruin isn't drawn like a Greek
+    temple. Depends on the place (keyed by country); a neutral, non-anachronistic cue otherwise."""
+    blob = f"{place} {country}".lower()
+    for key, hint in _ARCHITECTURE.items():
+        if re.search(rf"(?<![a-z]){re.escape(key)}(?![a-z])", blob):
+            return hint
+    return "architecture authentic to this place and era; no domes unless the place has them, no modern structures"
+
+
 # ------------------------------------------------------------------------------------------ selection
 def simplify_query(query: str) -> str:
     words = [w for w in re.findall(r"[A-Za-z]+", query.lower()) if w not in STOP_WORDS]
@@ -386,10 +436,11 @@ _GENERIC_WORDS = {"field", "fields", "grass", "tree", "trees", "wall", "sky", "r
                   "lawn", "bush", "bushes", "fence", "cloud", "clouds", "street", "path", "forest", "garden"}
 
 
-def _wiki_rank(item: MediaItem, query: str, script_terms: set[str]) -> float:
+def _wiki_rank(item: MediaItem, query: str, script_terms: set[str], avoid: set[str] | None = None) -> float:
     """Rank a Wikimedia candidate for a scene: relevance to the narration line first, then whether its
     title names a landmark the script talks about, its resolution, and a portrait/square shape (so a 9:16
-    crop keeps more). A generic shot that names nothing from the script is pushed down."""
+    crop keeps more). A generic shot that names nothing from the script is pushed down, an extreme panorama
+    is avoided (it crops badly), and a subject already used in this video is preferred against."""
     text_terms = _terms(item.text)
     s = 4.0 * relevance(item, query)
     s += min(len(text_terms & script_terms), 3) * 1.2            # title names script landmarks/place
@@ -397,10 +448,15 @@ def _wiki_rank(item: MediaItem, query: str, script_terms: set[str]) -> float:
     s += 1.2 if res >= 1600 else (0.8 if res >= 1000 else (0.3 if res >= 800 else 0.0))
     if item.height >= item.width:                                # portrait or square -> less cropping
         s += 1.5
+    lo, hi = min(item.width, item.height), max(item.width, item.height)
+    if lo and hi / lo > 2.0:                                     # panorama wider/taller than 2:1 -> crops badly
+        s -= 3.0
     if (text_terms & _GENERIC_WORDS) and not (text_terms & script_terms):
         s -= 2.5                                                 # an empty field / plain wall of nowhere named
     if _PEOPLE_RE.search(item.text):
         s -= 2.0                                                 # prefer against a close-up identifiable person
+    if avoid:                                                    # prefer a different subject from earlier scenes
+        s -= 1.5 * min(len((text_terms - script_terms) & avoid), 3)
     return s + 0.6 / (1.0 + 0.25 * item.rank)                    # small tiebreak by the API's own order
 
 
@@ -428,6 +484,7 @@ class Visuals:
             self.sources = ["local"]
         self.credits: set[str] = set()
         self.image_credits: list[dict] = []          # per Wikimedia image: title, author, license, urls
+        self.ai_used = False                          # True once a scene used an AI illustration (disclosure)
         self._wiki_cache: dict[str, list[MediaItem]] = {}
 
     # -- search per source (cached per query) --
@@ -553,7 +610,8 @@ class Visuals:
         self._wiki_cache[q.lower()] = items
         return items
 
-    def _claim_wiki(self, cands: list[MediaItem], query: str, script_terms: set[str]) -> MediaItem | None:
+    def _claim_wiki(self, cands: list[MediaItem], query: str, script_terms: set[str],
+                    avoid: set[str] | None = None) -> MediaItem | None:
         with self.lock:
             fresh, seen = [], set()
             for c in cands:
@@ -563,7 +621,7 @@ class Visuals:
                 fresh.append(c)
             if not fresh:
                 return None
-            best = max(fresh, key=lambda c: _wiki_rank(c, query, script_terms))
+            best = max(fresh, key=lambda c: _wiki_rank(c, query, script_terms, avoid))
             self.used.add(best.key)
             return best
 
@@ -604,11 +662,11 @@ class Visuals:
             self.credits.add("Pixabay")
 
     def _good_wiki(self, cands: list[MediaItem], query: str, script_terms: set[str], dest_dir: Path,
-                   idx: int, tries: int = 4) -> MediaItem | None:
+                   idx: int, tries: int = 4, avoid: set[str] | None = None) -> MediaItem | None:
         """Claim the best fresh candidate and download it, skipping to the next if it is near-blank /
         low-contrast. Returns a fetched item, or None when none is usable."""
         for _ in range(tries):
-            item = self._claim_wiki(cands, query, script_terms)
+            item = self._claim_wiki(cands, query, script_terms, avoid)
             if item is None:
                 return None
             try:
@@ -622,10 +680,55 @@ class Visuals:
             return item
         return None
 
-    def for_place_scenes(self, jobs: list[tuple[str, str, float]], place: str, country: str, dest_dir: Path,
+    def _historical_image(self, prompt: str, dest_dir: Path, idx: int, arch: str = "") -> MediaItem | None:
+        """A past scene the camera can't reach: generate one AI illustration in the configured consistent
+        cinematic style, period-accurate and in the architecture of ``arch`` (the place's own style). Free
+        providers only by default (pollinations/cloudflare = FLUX, Apache-2.0); paid providers (openai/gemini)
+        must be chosen explicitly. Returns None to fall back to a real photo."""
+        s = self.s
+        source = (getattr(s, "ai_scene_source", "") or "").strip().lower()
+        if source in ("", "none", "off"):
+            return None
+        style = s.ai_scene_style or s.visual_style
+        arch = arch or "architecture authentic to the place and era; no modern structures"
+        full = (f"{prompt}. {style}. {_HISTORICAL_PERIOD}. {arch}. "
+                "No text, no letters, no captions, no watermark, no modern logos or objects.")
+        dest = dest_dir / f"scene{idx:02d}_ai.jpg"
+        try:
+            if source == "pollinations":
+                pollinations_image(full, dest, s.width, s.height, s.pollinations_api_key)
+                src = "pollinations"
+            elif source in ("cloudflare", "workers-ai", "flux") and s.cloudflare_account_id and s.cloudflare_api_token:
+                cloudflare_image(full, dest, s.cloudflare_account_id, s.cloudflare_api_token)
+                src = "cloudflare"
+            elif source in ("openai", "openai-images", "gpt-image", "dalle") and s.openai_api_key:
+                dest = dest.with_suffix(".png")
+                openai_image(full, dest, s.openai_api_key, s.image_model, s.orientation)
+                src = "openai-images"
+            elif source in ("gemini", "nano-banana", "imagen"):
+                log.warning("AI_SCENE_SOURCE=%s is a paid, billing-enabled service and is not enabled; "
+                            "using a real photo for scene %d.", source, idx + 1)
+                return None
+            else:
+                log.warning("AI_SCENE_SOURCE=%r is not usable (missing key?); using a real photo for scene %d.",
+                            source, idx + 1)
+                return None
+        except Exception as e:
+            log.warning("Historical AI image (%s) for scene %d failed (%s); using a real photo instead.",
+                        source, idx + 1, redact(e))
+            return None
+        if not dest.exists() or dest.stat().st_size < 1024:
+            return None
+        self.ai_used = True
+        log.info("Scene %d: %s AI illustration (historical)", idx + 1, src)
+        return MediaItem(src, dest.name, "image", width=s.width, height=s.height, path=dest, query=prompt)
+
+    def for_place_scenes(self, jobs: list[tuple[str, str, bool]], place: str, country: str, dest_dir: Path,
                          progress=None, min_images: int = 5) -> list[MediaItem]:
-        """One Wikimedia image per scene, all of the named place. Raises SkipTopic if the place has fewer than
-        ``min_images`` freely-licensed images. Stock video is used only as a place-named fallback."""
+        """One image per scene of the named place: a freely-licensed Wikimedia photo for scenes about the place
+        TODAY, and a consistent-style AI illustration for scenes marked historical (the past can't be
+        photographed). Raises SkipTopic if the place has fewer than ``min_images`` freely-licensed photos, so a
+        video is never built about a place we can't actually document. Stock video is a place-named fallback."""
         dest_dir.mkdir(parents=True, exist_ok=True)
         pc = ", ".join(x for x in (place, country) if x)
         pool, seen = [], set()
@@ -640,20 +743,31 @@ class Visuals:
                             f"need {min_images}")
         # Landmarks/place the script talks about: used to prefer images whose titles name them.
         script_terms = _terms(place) | _terms(country)
-        for q, _p, _n in jobs:
+        for q, _p, _h in jobs:
             script_terms |= _terms(q)
+        arch = _architecture_hint(place, country)              # draw the past in THIS place's architecture
         results: list[MediaItem] = []
-        for i, (q, _prompt, _need) in enumerate(jobs):
-            item = self._good_wiki(self._wiki_search(f"{q} {place}") + pool, q, script_terms, dest_dir, i)
+        chosen: set[str] = set()                               # distinctive subjects already shown this video
+        for i, (q, prompt, historical) in enumerate(jobs):
+            item = self._historical_image(prompt or q, dest_dir, i, arch) if historical else None
+            if item is None:                                   # place-today scene, or AI unavailable/failed
+                item = self._good_wiki(self._wiki_search(f"{q} {place}") + pool, q, script_terms, dest_dir, i,
+                                       avoid=chosen)
             if item is None:                                   # no fresh place image -> place-named stock video
                 item = self._place_stock_video(q, place, country, dest_dir, i)
-            if item is None:                                   # reuse the best place photo, with its own camera move
-                item = replace(max(pool, key=lambda c: _wiki_rank(c, q, script_terms)))
+            if item is None:                                   # last resort: an unused place photo (never a repeat)
+                with self.lock:
+                    unused = [c for c in pool if c.key not in self.used] or pool
+                    best = max(unused, key=lambda c: _wiki_rank(c, q, script_terms, chosen))
+                    self.used.add(best.key)
+                item = replace(best)
                 try:
                     self._fetch(item, dest_dir, i)
                 except Exception as e:
                     log.warning("Wikimedia reuse download failed (%s)", redact(e))
                     item = MediaItem("generated", f"gradient-{i}", "generated", query=q)
+            if item.source == "wikimedia":                     # remember its subject so later scenes differ
+                chosen |= (_terms(item.text) - script_terms)
             self._record_credit(item)
             log.info("Scene %d: %s %s (%r)", i + 1, item.source, item.kind, q)
             results.append(item)
