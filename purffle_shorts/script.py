@@ -203,8 +203,8 @@ def pick_style(settings: Settings, source: str) -> str:
     return random.choice(AUTO_STYLES)
 
 
-HISTORY_MIN_SECONDS = 75          # the story format targets the middle of the 60-90s the user asked for
-HISTORY_RANGE = (60, 90)          # a history video must render within this many seconds
+HISTORY_MIN_SECONDS = 50          # the story format targets ~50s (the middle of the 45-60s window)
+HISTORY_RANGE = (45, 60)          # a history/place video must render within this many seconds
 
 
 def effective_seconds(style: str, target_seconds: int) -> int:
@@ -233,9 +233,10 @@ def _format_rules(style: str) -> str:
         return ("- speaker is always \"A\": one calm, cinematic narrator.\n"
                 "- Scene 1 narration IS the mystery question that opens the story (8-12 words, UNDER 60 "
                 "characters, no greeting), and the title is that exact question.\n"
-                "- Tell ONE human thread: who built it, who ruled or lost it, a rescue, a disappearance. Give a "
-                "clear turning point in the middle. Chronological and specific; ONLY well-established history — "
-                "never invent names, dates, numbers or quotes.\n")
+                "- Tell ONE human thread: who built it, who ruled or lost it, a rescue, a disappearance, with "
+                "ONE clear turning point in the middle. Keep it to that single thread — do NOT list several "
+                "rulers, dates or battle details. ONLY well-established history; never invent names, dates, "
+                "numbers or quotes.\n")
     if style == "place":
         return ("- speaker is always \"A\": one calm, cinematic narrator.\n"
                 "- Scene 1 narration IS the mystery question that opens the story (8-12 words, UNDER 60 "
@@ -270,13 +271,15 @@ def build_prompt(subject: str, style: str, settings: Settings, avoid: list[str],
     eff = effective_seconds(style, settings.target_seconds)
     history = style == "history"
     story = style in STORY_STYLES
-    ending = ("- The final scene is a calm, reflective payoff that answers the opening question; end gently (a "
-              "short, soft question is fine). Do NOT ask viewers to like, share, comment, subscribe or follow.\n"
+    ending = ("- The final scene answers the opening question, then ends with ONE short, open question to the "
+              "viewer that invites a reply (e.g. \"Which lost city would you visit?\"). Never ask them to like, "
+              "share, comment, subscribe or follow.\n"
               if story else
               "- The last scene lands the payoff, then a short call to action (max 8 words), e.g. asking viewers "
               "to comment or follow.\n")
-    length_rule = ("- This is a 60-90 second video: write BETWEEN 165 and 235 words total, and never fewer than "
-                   "165.\n" if story else "")
+    length_rule = ("- This is a 45-60 second video: write BETWEEN 115 and 155 words total, and never fewer than "
+                   "115. Keep the middle tight — one turning point, no lists of rulers, names or battle details.\n"
+                   if story else "")
     if history:
         visual_rules = (
             "- search_query: 2-5 English words naming the real present-day place or landmark of that scene (e.g. "
@@ -417,12 +420,12 @@ def normalize(data: dict, subject: str, style: str, language: str) -> Script:
     if not scenes:
         raise ValueError("script has no narration")
     if style in STORY_STYLES and scenes:
-        # A story video ends on a calm payoff, never a "like/share/follow" call to action. Strip a CTA the
-        # model tacked on — a trailing clause (joined by ; , — or "and") as well as a whole CTA sentence — as
-        # long as something reflective remains.
+        # A story may end on an OPEN question to the viewer ("Which city would you visit?") but never on a
+        # platform CTA ("like and subscribe"). Strip only the platform CTA the model tacked on — a trailing
+        # clause (joined by ; , — or "and") and any whole platform-CTA sentence — leaving the open question.
         last = scenes[-1]
         text = _CTA_TAIL.sub("", last.narration).strip(" ;:,.—–-")
-        kept = [p for p in re.split(r"(?<=[.!?])\s+", text) if p and not _CTA.search(p)]
+        kept = [p for p in re.split(r"(?<=[.!?])\s+", text) if p and not _PLATFORM_CTA.search(p)]
         cleaned = " ".join(kept).strip() or text
         if cleaned:
             if cleaned[-1] not in ".!?":
@@ -523,6 +526,10 @@ def write_script(llm, subject: str, settings: Settings, *, source: str = "niche"
 # --------------------------------------------------------------------------------------------------
 _GREETING = re.compile(r"^(hi|hey|hello|welcome|what'?s up|in this video|today (we|i|i'm|we're)|let'?s talk)\b", re.I)
 _CTA = re.compile(r"\b(follow|comment|subscribe|share|like|save|tell me|let me know|which one|would you)\b", re.I)
+# PLATFORM calls to action only (not open viewer questions): a story may end on "Which city would you visit?"
+# but never on "like and subscribe". Used to strip the latter from a story ending while keeping the former.
+_PLATFORM_CTA = re.compile(r"\b(follow|subscribe|like|share|comment|save|hit|smash|ring|"
+                           r"notifications?|link in bio|turn on)\b", re.I)
 # A call-to-action clause tacked onto the end of a line (after ; , — or "and"), e.g. "; subscribe for more".
 _CTA_TAIL = re.compile(r"[\s;:,.—–-]+(?:and\s+|so\s+|now\s+|then\s+|please\s+|don't forget to\s+|be sure to\s+)*"
                        r"(follow|subscribe|like|share|comment|save|hit|smash|ring)\b.*$", re.I)
@@ -554,7 +561,7 @@ def lint_script(script: Script, settings: Settings) -> list[str]:
         secs = n / WORDS_PER_SECOND
         lo, hi = HISTORY_RANGE
         if secs < lo:
-            out.append(f"About {n} words (~{secs:.0f}s); a {script.style} Short must run {lo}-{hi}s — expand to 165-235 words.")
+            out.append(f"About {n} words (~{secs:.0f}s); a {script.style} Short must run {lo}-{hi}s — expand to 115-155 words.")
         elif secs > hi + 5:
             out.append(f"About {n} words (~{secs:.0f}s); trim it to the {lo}-{hi}s range.")
     elif target and abs(n - target) > 0.25 * target:

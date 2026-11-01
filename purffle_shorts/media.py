@@ -207,11 +207,13 @@ def _wiki_title(title: str) -> str:
 
 
 # Titles/categories that mark a file we never want as footage: maps & diagrams, signs/notices/text boards
-# (they read as on-screen text), or butchery/carcasses.
+# (they read as on-screen text), food/dishes/restaurants/people-eating, or butchery/carcasses.
 _SKIP_IMAGE_RE = re.compile(
     r"(?<![a-z])(maps?|satellite|topographic|locator|diagram|schematic|floor ?plan|site ?plan|"
     r"sketch ?map|street ?map|road ?map|cadastral|"
     r"signs?|signboards?|signposts?|noticeboards?|notices?|warnings?|billboards?|boards?|plaques?|"
+    r"food|foods|dish|dishes|meals?|cuisine|restaurants?|cafes?|dining|buffets?|thali|curry|curries|"
+    r"breakfast|lunch|dinner|snacks?|eating|eaten|feast|"
     r"butcher\w*|carcass\w*|slaughter\w*|abattoir|flayed|animal corpse|dead animal)(?![a-z])", re.I)
 # Titles that suggest a close-up identifiable person — preferred against, not skipped outright.
 _PEOPLE_RE = re.compile(r"(?<![a-z])(portraits?|selfies?|close[ -]?ups?|headshots?|posing|mugshot)(?![a-z])", re.I)
@@ -859,13 +861,53 @@ class Visuals:
                             f"need {min_images}")
         return pool
 
+    def _open_landmark_image(self, pool: list[MediaItem], landmark_terms: set[str], place: str, country: str,
+                             dest_dir: Path) -> MediaItem | None:
+        """Scene 1: the strongest real photo of the main landmark named in the title — best title-match and
+        resolution, never a generic ground/tree/sky shot. Returns None (normal selection takes over) only if
+        the pool has nothing that names the landmark."""
+        place_terms = _terms(place) | _terms(country)
+
+        def rank(c: MediaItem) -> float:
+            tt = _terms(c.text)
+            if (tt & _GENERIC_WORDS) and not (tt & landmark_terms):
+                return -1.0                                    # a 'field / trees / sky' shot is never the opener
+            named = len(tt & landmark_terms)
+            if not named:
+                return 0.0                                     # doesn't name the landmark -> not a valid opener
+            res = min(c.width, c.height)
+            s = 3.0 * named + 2.0 * relevance(c, " ".join(landmark_terms | place_terms))
+            s += 1.5 if res >= 1600 else (1.0 if res >= 1000 else 0.3)
+            if c.height >= c.width:                            # portrait/square crops to 9:16 with less loss
+                s += 0.8
+            return s
+
+        for _ in range(4):                                     # try the best few, skipping any near-blank image
+            with self.lock:
+                cands = [c for c in pool if c.key not in self.used and rank(c) > 0]
+                if not cands:
+                    return None
+                best = max(cands, key=rank)
+                self.used.add(best.key)
+            item = replace(best)
+            try:
+                self._fetch(item, dest_dir, 0)
+            except Exception as e:
+                log.warning("Opening landmark download failed (%s)", redact(e))
+                continue
+            if _low_quality_image(item.path):
+                continue
+            return item
+        return None
+
     def for_place_scenes(self, jobs: list[tuple[str, str, bool]], place: str, country: str, dest_dir: Path,
                          progress=None, min_images: int = 5, lat: float | None = None, lon: float | None = None,
-                         article: str = "") -> list[MediaItem]:
+                         article: str = "", title: str = "") -> list[MediaItem]:
         """One image per scene of the named place: a freely-licensed Wikimedia photo for scenes about the place
         TODAY, and a consistent-style AI illustration for scenes marked historical (the past can't be
         photographed). Only place-accurate photos are used (geosearch within ~5 km, or a title that names the
-        place); raises SkipTopic if there are fewer than ``min_images``. No image is shown for more than two
+        place); raises SkipTopic if there are fewer than ``min_images``. Scene 1 is the strongest real photo of
+        the landmark named in ``title`` (never a generic ground/tree shot). No image is shown for more than two
         scenes in a row. Stock video is a place-named fallback."""
         dest_dir.mkdir(parents=True, exist_ok=True)
         pool = self._place_pool(place, country, lat, lon, min_images)
@@ -873,12 +915,15 @@ class Visuals:
         script_terms = _terms(place) | _terms(country)
         for q, _p, _h in jobs:
             script_terms |= _terms(q)
+        landmark_terms = (_terms(title) - _terms(place) - _terms(country)) or script_terms
         arch = _architecture_hint(place, country, article)     # draw the past in THIS place's architecture/region
         results: list[MediaItem] = []
         chosen: set[str] = set()                               # distinctive subjects already shown this video
         prev_key, consec = None, 0
         for i, (q, prompt, historical) in enumerate(jobs):
             item = self._historical_image(prompt or q, dest_dir, i, arch) if historical else None
+            if item is None and i == 0:                        # opener: the strongest photo of the title landmark
+                item = self._open_landmark_image(pool, landmark_terms, place, country, dest_dir)
             if item is None:                                   # place-today scene, or AI unavailable/failed
                 item = self._good_wiki(pool, q, script_terms, dest_dir, i, avoid=chosen)
             if item is None:                                   # no fresh place image -> place-named stock video

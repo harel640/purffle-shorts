@@ -581,7 +581,7 @@ class Studio:
                     per_scene = visuals.for_place_scenes(
                         scene_jobs, place, country, work / "media", progress=self._sub,
                         min_images=s.min_place_images, lat=coords[0] if coords else None,
-                        lon=coords[1] if coords else None, article=pick.source_text)
+                        lon=coords[1] if coords else None, article=pick.source_text, title=script.title)
                     media = [per_scene[st.index] for st in shots]
                 else:
                     # AI images cost money or are rate-limited: the extra shots of a scene reuse its picture with
