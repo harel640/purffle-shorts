@@ -335,20 +335,22 @@ _HISTORICAL_PERIOD = "period-accurate, no modern clothing, no backpacks or moder
 
 # Architecture cue per place, so a past scene is drawn in the style of THAT place rather than one hardcoded
 # look. Keyed by country (or a distinctive place keyword); extend by adding an entry.
+# Each cue leads with the place's own temple style and ends with an explicit "no domes" for the styles that
+# don't have them (gopurams / stupas / pagodas / dzongs) — placed FIRST in the prompt so the model obeys it.
 _ARCHITECTURE = {
-    "india": "South Indian stone temple architecture (gopurams, pillared mandapas); no domes unless the place has them",
-    "myanmar": "Burmese temple architecture (gilded stupas, zedi spires)",
-    "burma": "Burmese temple architecture (gilded stupas, zedi spires)",
-    "thailand": "Thai temple architecture (chedi stupas, tiered gilded roofs)",
-    "cambodia": "Khmer temple architecture (laterite and sandstone prangs, Angkor style)",
-    "indonesia": "Indonesian candi architecture (stepped stone terraces, Borobudur/Prambanan style)",
-    "sri lanka": "Sinhalese architecture (dagoba stupas, carved stone pillars)",
-    "nepal": "Newar pagoda architecture (tiered wooden roofs, carved struts)",
-    "japan": "Japanese architecture (wooden temples and pagodas, curved tiled roofs)",
-    "china": "Chinese architecture (timber halls, upturned tiled eaves)",
-    "vietnam": "Vietnamese architecture (tiled curved roofs, Cham brick towers where apt)",
-    "laos": "Lao temple architecture (that stupas, tiered roofs)",
-    "bhutan": "Bhutanese dzong architecture (fortress-monasteries, sloping whitewashed walls)",
+    "india": "South Indian stone temple architecture with tall gopuram towers and pillared mandapas, no domes",
+    "myanmar": "Burmese temple architecture with gilded stupas and zedi spires, no domes",
+    "burma": "Burmese temple architecture with gilded stupas and zedi spires, no domes",
+    "thailand": "Thai temple architecture with chedi stupas and tiered gilded roofs, no domes",
+    "cambodia": "Khmer temple architecture with laterite and sandstone prangs (Angkor style), no domes",
+    "indonesia": "Indonesian candi architecture with stepped stone terraces (Borobudur/Prambanan style), no domes",
+    "sri lanka": "Sinhalese architecture with dagoba stupas and carved stone pillars, no domes",
+    "nepal": "Newar pagoda architecture with tiered wooden roofs and carved struts, no domes",
+    "japan": "Japanese architecture with wooden temples and pagodas and curved tiled roofs, no domes",
+    "china": "Chinese architecture with timber halls and upturned tiled eaves, no domes",
+    "vietnam": "Vietnamese architecture with tiled curved roofs and Cham brick towers, no domes",
+    "laos": "Lao temple architecture with that stupas and tiered roofs, no domes",
+    "bhutan": "Bhutanese dzong architecture, fortress-monasteries with sloping whitewashed walls, no domes",
 }
 
 
@@ -359,7 +361,7 @@ def _architecture_hint(place: str, country: str) -> str:
     for key, hint in _ARCHITECTURE.items():
         if re.search(rf"(?<![a-z]){re.escape(key)}(?![a-z])", blob):
             return hint
-    return "architecture authentic to this place and era; no domes unless the place has them, no modern structures"
+    return "architecture authentic to this place and era, no domes unless the place is known for them, no modern structures"
 
 
 # ------------------------------------------------------------------------------------------ selection
@@ -690,9 +692,11 @@ class Visuals:
         if source in ("", "none", "off"):
             return None
         style = s.ai_scene_style or s.visual_style
-        arch = arch or "architecture authentic to the place and era; no modern structures"
-        full = (f"{prompt}. {style}. {_HISTORICAL_PERIOD}. {arch}. "
-                "No text, no letters, no captions, no watermark, no modern logos or objects.")
+        arch = arch or "architecture authentic to the place and era, no modern structures"
+        # Architecture FIRST (so the model honours "no domes"); negatives include letterbox/black bars.
+        full = (f"{arch}. {prompt}. {style}. {_HISTORICAL_PERIOD}. "
+                "No text, no letters, no captions, no watermark, no modern logos or objects, "
+                "no black bars, no letterbox, no borders — the scene fills the entire vertical frame.")
         dest = dest_dir / f"scene{idx:02d}_ai.jpg"
         try:
             if source == "pollinations":
@@ -719,9 +723,18 @@ class Visuals:
             return None
         if not dest.exists() or dest.stat().st_size < 1024:
             return None
+        # Use the image's REAL dimensions (providers may return a square): the render cover-crops by the true
+        # aspect, so the frame is filled instead of letterboxed.
+        w, h = s.width, s.height
+        try:
+            from PIL import Image
+            with Image.open(dest) as im:
+                w, h = im.size
+        except Exception:
+            pass
         self.ai_used = True
         log.info("Scene %d: %s AI illustration (historical)", idx + 1, src)
-        return MediaItem(src, dest.name, "image", width=s.width, height=s.height, path=dest, query=prompt)
+        return MediaItem(src, dest.name, "image", width=w, height=h, path=dest, query=prompt)
 
     def for_place_scenes(self, jobs: list[tuple[str, str, bool]], place: str, country: str, dest_dir: Path,
                          progress=None, min_images: int = 5) -> list[MediaItem]:

@@ -1,6 +1,27 @@
+from datetime import datetime, timedelta, timezone
+
 from purffle_shorts.config import Settings, parse_resolution
 from purffle_shorts.history import History
+from purffle_shorts.pipeline import place_recently_used
 from purffle_shorts.utils import redact
+
+
+def test_recent_places_only_within_window(tmp_path):
+    h = History(tmp_path / "h.db")
+    old = (datetime.now(timezone.utc) - timedelta(days=120)).isoformat(timespec="seconds")
+    h.add_video(status="rendered", resolved_place="Old Place, India", created_at=old)
+    h.add_video(status="rendered", resolved_place="Hampi, India")   # created now
+    places = h.recent_places(90)
+    assert "Hampi, India" in places and "Old Place, India" not in places
+
+
+def test_place_recently_used_matches_resolved_place_not_title():
+    recent = ["Vittala Temple, Hampi, India", "Bagan, Myanmar"]
+    assert place_recently_used("Hampi", "India", recent) is True            # same place, different wording
+    assert place_recently_used("Hampi, India", "India", recent) is True
+    assert place_recently_used("Konark Sun Temple", "India", recent) is False   # different place, same country
+    assert place_recently_used("Angkor Wat", "Cambodia", recent) is False
+    assert place_recently_used("", "", recent) is False
 
 
 def test_legacy_env_names_still_work(monkeypatch):

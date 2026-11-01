@@ -9,6 +9,7 @@ import concurrent.futures
 import json
 import logging
 import os
+import re
 import shutil
 import time
 from collections.abc import Callable
@@ -49,6 +50,28 @@ AI_SOURCES = {"openai-images", "ai", "dalle", "gpt-image", "pollinations", "clou
 REUSABLE_SOURCES = {"generated", "local", "background"} | AI_SOURCES
 # Added to the description (and the YouTube synthetic-content disclosure is set) whenever a video uses AI images.
 AI_DISCLOSURE = "Some scenes are AI illustrations."
+
+PLACE_REUSE_DAYS = 90    # don't let the autopilot pick a place already made within this many days
+
+# Generic words stripped when comparing place names, so "Hampi", "Hampi, India" and "Vittala Temple, Hampi"
+# all reduce to the same distinctive token ("hampi").
+_PLACE_GENERIC = {"temple", "temples", "city", "town", "fort", "ruins", "ruin", "old", "ancient", "great",
+                  "palace", "site", "complex", "valley", "river", "lake", "mount", "hill", "cave", "caves",
+                  "monastery", "stupa", "pagoda", "the", "of", "and", "at", "national", "park"}
+
+
+def _place_tokens(text: str, extra_stop: frozenset[str] = frozenset()) -> set[str]:
+    stop = _PLACE_GENERIC | extra_stop
+    return {t for t in re.findall(r"[a-z]+", (text or "").lower()) if len(t) > 2 and t not in stop}
+
+
+def place_recently_used(place: str, country: str, recent_places: list[str]) -> bool:
+    """True when ``place`` shares a distinctive name token with any recently-made place, so a place is matched
+    by what it resolves to rather than by the exact title (e.g. 'Hampi' == 'Vittala Temple, Hampi')."""
+    key = _place_tokens(place, frozenset(re.findall(r"[a-z]+", (country or "").lower())))
+    if not key:
+        return False
+    return any(key & _place_tokens(rp) for rp in recent_places)
 
 # Rough share of the work done when each stage starts (for progress bars before any timing is learned).
 STAGES = {"topic": 2, "script": 8, "review": 20, "voice": 32, "footage": 45, "captions": 62, "render": 72,
@@ -467,6 +490,11 @@ class Studio:
                     v = safety.check(", ".join(x for x in (place, country) if x), self.llm)
                     if v.unsafe:
                         raise safety.UnsafeTopic(v.reason)
+                # Don't let the autopilot repeat a place made recently (matched by resolved place, not title).
+                # A user who explicitly asks for a topic (source "manual"/url/document) is never blocked.
+                if pick.source not in ("manual", "script", "clip", "url", "document"):
+                    if place_recently_used(place, country, self.history.recent_places(PLACE_REUSE_DAYS)):
+                        raise SkipTopic(f"place '{place}' was already used in the last {PLACE_REUSE_DAYS} days")
             # Sensitive-region policy skip (separate from travel advisories): place + the script's own words.
             hit = safety.sensitive_region(place, country, script.title, script.topic,
                                           " ".join(sc.narration for sc in script.scenes))
@@ -607,7 +635,8 @@ class Studio:
                 subject=pick.subject, source=pick.source, topic=script.topic, style=script.style,
                 language=s.language, title=title, description=description, tags=script.tags,
                 folder=str(folder), video_path=str(video), duration=info["duration"],
-                llm=meta["llm"], voice=meta["voice"], status="rendered", score=script.score, parent_id=parent_id)
+                llm=meta["llm"], voice=meta["voice"], status="rendered", score=script.score, parent_id=parent_id,
+                resolved_place=(", ".join(x for x in (place, country) if x) or None))
             state["record_id"] = rid
             if not media_map:
                 self.history.mark_media([m.key for m in media if m.source not in REUSABLE_SOURCES])

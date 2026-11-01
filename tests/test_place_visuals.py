@@ -218,11 +218,32 @@ def test_place_scenes_never_repeats_an_image(settings, monkeypatch, tmp_path):
 
 
 def test_architecture_hint_depends_on_place():
-    assert "gopuram" in M._architecture_hint("Hampi", "India").lower()
+    india = M._architecture_hint("Hampi", "India").lower()
+    assert "gopuram" in india and "no domes" in india           # dome-free style, explicit negative
     assert "khmer" in M._architecture_hint("Angkor Wat", "Cambodia").lower()
     assert "burmese" in M._architecture_hint("Bagan", "Myanmar").lower()
     neutral = M._architecture_hint("Some Place", "Narnia")       # unknown -> neutral, non-anachronistic cue
     assert "gopuram" not in neutral.lower() and "modern" in neutral.lower()
+
+
+def test_historical_image_fills_frame_and_leads_with_architecture(settings, monkeypatch, tmp_path):
+    from PIL import Image
+    settings.ai_scene_source = "pollinations"
+    v = Visuals(settings)
+    seen = {}
+
+    def fake_poll(prompt, dest, width, height, key=""):
+        seen["prompt"] = prompt
+        Image.new("RGB", (1024, 1024), (40, 40, 40)).save(dest)   # provider returns a SQUARE image
+        return dest
+
+    monkeypatch.setattr(M, "pollinations_image", fake_poll)
+    item = v._historical_image("a king's court", tmp_path, 0, arch="South Indian gopurams, no domes")
+    assert item is not None and item.source == "pollinations" and v.ai_used is True
+    assert (item.width, item.height) == (1024, 1024)             # REAL dims (not the 1080x1920 frame) -> cover-crop fills
+    p = seen["prompt"]
+    assert p.startswith("South Indian gopurams, no domes")        # architecture leads the prompt
+    assert "no domes" in p and "no letterbox" in p and "no black bars" in p
 
 
 def test_cloudflare_image_decodes_base64(tmp_path, monkeypatch):
