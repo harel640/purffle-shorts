@@ -168,6 +168,9 @@ def final_title(script: Script, settings: Settings | None = None, text: str | No
     t = script.title if text is None else text
     if settings is not None and not settings.vertical:
         return truncate_words(t, 100)  # a 16:9 video is not a Short
+    # Keep the base title under 60 even after a fact-check rewrite (which runs after the writer's own cap),
+    # before the " #shorts" tag is appended.
+    t = truncate_words(t, 60)
     return f"{t} #shorts" if len(t) + 8 <= 100 else truncate_words(t, 100)
 
 
@@ -508,9 +511,11 @@ class Studio:
                 if pick.source not in ("manual", "script", "clip", "url", "document"):
                     if place_recently_used(place, country, self.history.recent_places(PLACE_REUSE_DAYS)):
                         raise SkipTopic(f"place '{place}' was already used in the last {PLACE_REUSE_DAYS} days")
-            # Sensitive-region policy skip (separate from travel advisories): place + the script's own words.
-            hit = safety.sensitive_region(place, country, script.title, script.topic,
-                                          " ".join(sc.narration for sc in script.scenes))
+            # Sensitive-region policy skip (separate from travel advisories): by the RESOLVED place's
+            # region/province ONLY — not by words that merely appear in the narration or article. A village
+            # that mentions a nearby border (e.g. Chitkul near Tibet) is not in that region and is not blocked;
+            # a place that resolves to Lhasa or Kashgar is.
+            hit = safety.sensitive_region(place, country)
             if hit:
                 raise SkipTopic(f"sensitive region ({hit}) — skipped by policy")
             self._step("voice", f"{s.tts_engine} voice")
