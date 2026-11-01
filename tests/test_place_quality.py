@@ -262,7 +262,7 @@ class _FakeVisionLLM:
 
 def test_image_shows_parses_yes_no(monkeypatch, tmp_path):
     from purffle_shorts.llm import LLM
-    monkeypatch.setenv("GROQ_API_KEY", "k")
+    monkeypatch.setenv("GEMINI_API_KEY", "k")
     img = tmp_path / "x.jpg"
     img.write_bytes(b"\xff\xd8\xff\xe0 jpeg bytes")
     answers = iter(["Yes.", "no", "maybe"])
@@ -278,10 +278,29 @@ def test_image_shows_parses_yes_no(monkeypatch, tmp_path):
 
     monkeypatch.setattr("purffle_shorts.llm.http", lambda: _Sess())
     llm = LLM.__new__(LLM)                       # bypass provider wiring; we only test image_shows
-    llm.settings = Settings()
+    llm.settings = Settings(vision_model="gemini-x")   # fixed model -> no network model lookup
     assert llm.image_shows(img, "a temple") is True
     assert llm.image_shows(img, "a temple") is False
-    assert llm.image_shows(img, "a temple") is None    # unusable answer -> None
+    assert llm.image_shows(img, "a temple") is None    # unusable answer -> Cloudflare absent -> None
+
+
+def test_image_shows_falls_back_to_cloudflare_when_gemini_absent(monkeypatch, tmp_path):
+    from purffle_shorts.llm import LLM
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    img = tmp_path / "x.jpg"
+    img.write_bytes(b"\x89PNG bytes")
+
+    class _Resp:
+        status_code = 200
+        def json(self):
+            return {"result": {"description": "No, this is a beach."}}
+
+    monkeypatch.setattr("purffle_shorts.llm.http", lambda: type("S", (), {
+        "post": lambda self, url, json=None, headers=None, timeout=None: _Resp()})())
+    llm = LLM.__new__(LLM)
+    llm.settings = Settings(cloudflare_account_id="acct", cloudflare_api_token="tok")
+    assert llm.image_shows(img, "a temple") is False    # Cloudflare LLaVA answer parsed
 
 
 def test_verify_subject_rejects_and_caches(monkeypatch, tmp_path):
