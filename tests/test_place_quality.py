@@ -348,6 +348,61 @@ def test_landmark_opener_excludes_animal_and_people_titles(monkeypatch, tmp_path
     assert out[0].id == "t1"                      # the monkey photo is never the opener
 
 
+def test_vision_available_detects_a_backend(monkeypatch):
+    from purffle_shorts.llm import LLM
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    llm = LLM.__new__(LLM)
+    llm.settings = Settings()
+    assert llm.vision_available() is False
+    llm.settings = Settings(cloudflare_account_id="a", cloudflare_api_token="t")
+    assert llm.vision_available() is True
+    monkeypatch.setenv("GEMINI_API_KEY", "k")
+    llm.settings = Settings()
+    assert llm.vision_available() is True
+
+
+def test_fail_closed_skips_video_when_vision_unavailable(monkeypatch, tmp_path):
+    class _LLM:                                   # configured, but every call fails (down / out of quota)
+        def vision_available(self):
+            return True
+
+        def image_shows(self, path, subject):
+            return None
+
+    v = Visuals(Settings(visual_sources=["wikimedia"]), llm=_LLM())
+    pool = [_wimg(f"p{i}", f"Gokarna Mahabaleshwar temple {i}") for i in range(5)]
+    monkeypatch.setattr(M, "geosearch_images", lambda *a, **k: list(pool))
+    monkeypatch.setattr(v, "_wiki_search", lambda q: [])
+    monkeypatch.setattr(v, "_fetch", lambda item, d, i: (setattr(item, "path", d / f"{item.id}.jpg") or item))
+    monkeypatch.setattr(M, "_low_quality_image", lambda p: False)
+    with pytest.raises(SkipTopic, match="vision unavailable"):
+        v.for_place_scenes([("temple", "", False)] * 3, "Gokarna", "India", tmp_path / "m",
+                           min_images=5, lat=14.5, lon=74.3, title="Why does Gokarna temple hide a secret?")
+
+
+def test_neuron_budget_reserves_allocation_for_vision(tmp_path):
+    from purffle_shorts.history import History
+    from purffle_shorts.media import NeuronBudget
+    b = NeuronBudget(History(tmp_path / "h.db"), daily=1000, reserve=400)   # 600 spendable on image gen
+    assert b.can_spend(500) is True
+    b.record(500)
+    assert b.can_spend(500) is False              # 500 + 500 > 600
+    assert b.can_spend(100) is True               # 500 + 100 == 600, still allowed
+
+
+def test_ai_image_falls_back_to_photo_when_reserve_hit(monkeypatch, tmp_path):
+    from purffle_shorts.history import History
+    from purffle_shorts.media import NeuronBudget
+    b = NeuronBudget(History(tmp_path / "h.db"), daily=1000, reserve=1000)  # nothing left for gen
+    v = Visuals(Settings(ai_scene_source="cloudflare", cloudflare_account_id="a", cloudflare_api_token="t"),
+                budget=b)
+    called = {"n": 0}
+    monkeypatch.setattr(M, "cloudflare_image", lambda *a, **k: called.__setitem__("n", called["n"] + 1))
+    assert v._historical_image("stonemasons raising a temple wall", tmp_path, 0, arch="x") is None
+    assert called["n"] == 0                        # generation never ran; the scene falls back to a real photo
+
+
 def test_ai_scene_style_is_cinematic_painterly_not_cartoon():
     style = Settings().ai_scene_style.lower()
     assert "painterly" in style and "cinematic" in style

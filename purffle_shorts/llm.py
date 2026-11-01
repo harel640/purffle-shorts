@@ -451,6 +451,12 @@ class LLM:
         return (f'Does the main subject of this image clearly show {subject}? It must be {subject}, not a beach, '
                 f'a street, an animal, a person, a sign, or an unrelated place. Answer only "yes" or "no".')
 
+    def vision_available(self) -> bool:
+        """True when a vision backend is configured (so a None result means 'the call failed', not 'no model')."""
+        if any(os.getenv(e) for e in ("GEMINI_API_KEY", "GOOGLE_API_KEY")):
+            return True
+        return bool(self.settings.cloudflare_account_id and self.settings.cloudflare_api_token)
+
     def _gemini_vision_model(self) -> tuple[str, str] | None:
         """(key, model) for Gemini vision — the account's current model, not a hardcoded (and now 404'd) one."""
         key = next((os.environ[e] for e in ("GEMINI_API_KEY", "GOOGLE_API_KEY") if os.getenv(e)), "")
