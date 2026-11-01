@@ -145,6 +145,41 @@ def test_factcheck_rewrites_unsupported_stats():
     assert out.tags == ["bagan", "temples"]
 
 
+def test_ground_rejects_invented_claims_not_in_source():
+    src = "Hampi was the capital of the Vijayanagara Empire. The city fell in 1565."
+    sc = Script(
+        topic="Hampi", title="Why was Hampi abandoned?", hook_text="",
+        scenes=[
+            Scene(narration="Hampi was the capital of Vijayanagara.", search_query="hampi"),
+            Scene(narration="The city fell in 1565.", search_query="hampi"),
+            Scene(narration="It was home to exactly 700,000 people by 1491.", search_query="hampi"),
+        ],
+        description="", tags=[])
+    out = factcheck.ground(sc, src)
+    joined = out.narration
+    assert "700,000" not in joined and "1491" not in joined   # invented specifics are removed
+    assert "1565" in joined                                    # a fact that IS in the source survives
+    assert len(out.scenes) == 2                                # the all-invented scene is dropped
+
+
+def test_ground_catches_space_separated_numbers():
+    # "1 500" (space as a thousands separator) is verified as 1500, not as "1" and "500".
+    src = "The site has about 1,600 surviving structures."
+    sc = Script(topic="x", title="t", hook_text="",
+                scenes=[Scene(narration="It spans a hill.", search_query="q"),
+                        Scene(narration="Diggers found over 1 500 structures here.", search_query="q")],
+                description="", tags=[])
+    out = factcheck.ground(sc, src)
+    assert all("1 500" not in s.narration and "1500" not in s.narration for s in out.scenes)
+    assert len(out.scenes) == 1 and "hill" in out.scenes[0].narration
+
+
+def test_ground_is_noop_without_a_source():
+    sc = Script(topic="x", title="t", hook_text="", scenes=[Scene("In 1999 something happened.", "q")],
+                description="", tags=[])
+    assert factcheck.ground(sc, "").scenes[0].narration == "In 1999 something happened."
+
+
 def test_factcheck_fails_open_on_error():
     sc = _script()
     before = sc.scenes[0].narration

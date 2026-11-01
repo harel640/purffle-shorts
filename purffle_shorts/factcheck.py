@@ -12,12 +12,77 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 
 from .utils import clean_narration, emphasis_key, redact
 
 log = logging.getLogger("purffle")
 
 SYSTEM = "You are a careful fact-checker for short videos. You reply only with strict JSON."
+
+# A "hard" verifiable specific: a year, count, or percentage. These can be checked against a source text
+# deterministically, so an invented one is caught even when the LLM fact-check is unavailable or lets it slip.
+_FACT_RE = re.compile(r"\b\d[\d,]*(?:\.\d+)?%?\b")
+_SENT_SPLIT = re.compile(r"(?<=[.!?])\s+")
+# Thousands separators written as a space / thin space / non-breaking space, e.g. "1 500" -> "1500".
+_DIGIT_SPACE = re.compile(r"(?<=\d)[    ](?=\d)")
+
+
+def _collapse(text: str) -> str:
+    return _DIGIT_SPACE.sub("", text)
+
+
+def _supported(token: str, source_norm: str) -> bool:
+    t = token.replace(",", "").rstrip("%").strip()
+    return not t or t in source_norm
+
+
+def ground(script, source_text: str, settings=None):
+    """Deterministic grounding guardrail: a story's specific numbers, years and percentages must appear in the
+    source article (``source_text``). Any that don't are invented — the sentence carrying one is dropped (and a
+    scene left empty is removed). The prompt already tells the writer to ground every claim; this enforces it
+    for the checkable facts. No-op when there is no source text. Mutates and returns the same Script."""
+    if not source_text or not getattr(script, "scenes", None):
+        return script
+    source_norm = _collapse(source_text.replace(",", "").lower())
+
+    def bad(text: str) -> list[str]:
+        return [m.group(0) for m in _FACT_RE.finditer(_collapse(text))
+                if not _supported(m.group(0).lower(), source_norm)]
+
+    flagged: list[str] = []
+    for attr in ("title", "hook_text"):                       # strip unsupported specifics from the metadata
+        val = getattr(script, attr, "") or ""
+        for tok in bad(val):
+            val = re.sub(rf"\s*\b{re.escape(tok)}\b", "", val).strip(" ,-:–")
+            flagged.append(f"{attr}: removed unsupported '{tok}'")
+        setattr(script, attr, val)
+
+    kept = []
+    for sc in script.scenes:
+        sents = _SENT_SPLIT.split(sc.narration.strip())
+        keep = []
+        for s in sents:
+            b = bad(s)
+            if b:
+                flagged.append(f"removed unsupported claim ({', '.join(b)}): {s[:70]}")
+                continue
+            keep.append(s)
+        new = clean_narration(" ".join(keep).strip())
+        if new:
+            if new != sc.narration:
+                sc.narration = new
+                _prune_emphasis(sc)
+            kept.append(sc)
+        else:
+            flagged.append(f"dropped scene with only unsupported claims: {sc.narration[:70]}")
+    if kept:
+        script.scenes = kept
+    if flagged:
+        log.info("Grounding: dropped %d unsupported specific(s) not found in the source", len(flagged))
+        for f in flagged[:8]:
+            log.info("  %s", f[:160])
+    return script
 
 
 def _prune_emphasis(scene) -> None:

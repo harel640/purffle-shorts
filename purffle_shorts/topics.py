@@ -46,6 +46,30 @@ class Topic:
     style: str = ""
     idea_id: int | None = None
     keywords: list[str] = field(default_factory=list)  # real YouTube searches handed to the script writer
+    source_url: str = ""     # the grounding article's URL (shown in the description, saved in metadata)
+    source_text: str = ""    # the grounding article's plain text (facts must come from here, not be invented)
+
+
+def article(query: str, lang: str = "en", max_chars: int = 5000) -> tuple[str, str]:
+    """Plain text and URL of the best-matching Wikipedia article for ``query`` (free API, no key). Used to
+    ground a story in real facts. Returns ("", "") on any failure, so grounding is best-effort."""
+    try:
+        r = http().get(f"https://{lang}.wikipedia.org/w/api.php", timeout=20, params={
+            "action": "query", "format": "json", "redirects": 1,
+            "generator": "search", "gsrsearch": query, "gsrlimit": 1, "gsrnamespace": 0,
+            "prop": "extracts", "explaintext": 1, "exsectionformat": "plain"})
+        raise_for_status(r, "Wikipedia article")
+        pages = (r.json().get("query") or {}).get("pages") or {}
+        page = next(iter(pages.values()), None) if isinstance(pages, dict) else (pages[0] if pages else None)
+        if not page or not page.get("extract"):
+            return "", ""
+        title = page.get("title", "")
+        text = re.sub(r"\n{3,}", "\n\n", str(page["extract"]).strip())[:max_chars]
+        url = f"https://{lang}.wikipedia.org/wiki/{title.replace(' ', '_')}"
+        return text, url
+    except Exception as e:
+        log.warning("Wikipedia grounding for %r failed: %s", query, e)
+        return "", ""
 
 
 def _weighted_sources(settings: Settings) -> list[tuple[str, float]]:

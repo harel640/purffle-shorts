@@ -33,3 +33,14 @@ def test_build_body_public_now():
     assert body["status"]["privacyStatus"] == "unlisted" and "publishAt" not in body["status"]
     assert "containsSyntheticMedia" not in body["status"]
     assert body["snippet"]["defaultAudioLanguage"] == "es"
+
+
+def test_build_body_synthetic_is_per_video():
+    s = Settings(synthetic_media=True)
+    # No AI images in this video -> no disclosure, even with the master switch on.
+    assert "containsSyntheticMedia" not in Y.build_body(s, "t", "d", [], "27", "en", synthetic=False)["status"]
+    # AI images were used -> disclose.
+    assert Y.build_body(s, "t", "d", [], "27", "en", synthetic=True)["status"]["containsSyntheticMedia"] is True
+    # None (older metadata) falls back to the master switch.
+    assert "containsSyntheticMedia" not in Y.build_body(
+        Settings(synthetic_media=False), "t", "d", [], "27", "en", synthetic=None)["status"]

@@ -142,6 +142,14 @@ class Settings:
     media_dir: str = "media"
     image_model: str = "gpt-image-1"
     visual_style: str = "cinematic, dramatic lighting, highly detailed, vertical composition"
+    # Historical/past scenes (story format) can't be photographed, so they are AI illustrations in one
+    # consistent cinematic style. pollinations (free, keyless, FLUX/Apache-2.0) and cloudflare (free tier,
+    # FLUX.1-schnell, needs a token) are free; openai/gemini are paid. "none" = no AI, use real photos only.
+    ai_scene_source: str = "pollinations"
+    ai_scene_style: str = ("cinematic historical illustration, painterly, warm dramatic lighting, muted earthy "
+                           "colour palette, atmospheric haze, highly detailed, consistent art direction, film still")
+    cloudflare_account_id: str = ""   # Cloudflare Workers AI (free tier) account id, for ai_scene_source=cloudflare
+    cloudflare_api_token: str = ""     # Cloudflare Workers AI API token (a secret, never logged)
     prefer_4k: bool = False
     background_video: str = ""        # a video file or folder (gameplay, satisfying clips) played under stories
     background_layout: str = "full"   # full = the background is the picture; split = footage on top, it below
@@ -321,6 +329,10 @@ class Settings:
             media_dir=_env("MEDIA_DIR", d.media_dir),
             image_model=_env("IMAGE_MODEL", d.image_model),
             visual_style=_env("VISUAL_STYLE", d.visual_style),
+            ai_scene_source=_env("AI_SCENE_SOURCE", d.ai_scene_source).lower(),
+            ai_scene_style=_env("AI_SCENE_STYLE", d.ai_scene_style),
+            cloudflare_account_id=_env("CLOUDFLARE_ACCOUNT_ID"),
+            cloudflare_api_token=_env("CLOUDFLARE_API_TOKEN"),
             prefer_4k=_bool(_env("PREFER_4K", "false")),
             background_video=_env("BACKGROUND_VIDEO"),
             background_layout=_env("BACKGROUND_LAYOUT", d.background_layout).lower(),

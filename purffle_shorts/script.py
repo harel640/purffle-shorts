@@ -30,6 +30,9 @@ LANGUAGES = {
 STYLES = {
     "facts": "Rapid-fire surprising facts about one specific subject, each one more surprising than the last.",
     "story": "A tight true story: a hook that opens a loop, rising tension, then a satisfying twist or payoff.",
+    "history": "A story-driven mini-documentary about one real place: open on a mystery question, follow one "
+               "human thread (the builders, a ruler, a rescue, a disappearance) to a turning point, and land a "
+               "calm, reflective payoff. Cinematic and unhurried — a story, never a list of facts.",
     "listicle": "A top-3 countdown (number 3, number 2, number 1) where number 1 is the most surprising.",
     "myth": "Myth vs. fact: state a belief most people hold, then bust it with clear evidence.",
     "quiz": "Open with a question the viewer will try to answer, build suspense, reveal the answer at the end.",
@@ -63,10 +66,11 @@ SCENE_SCHEMA = {
         "narration": {"type": "string"},
         "search_query": {"type": "string"},
         "image_prompt": {"type": "string"},
+        "historical": {"type": "boolean"},
         "emphasis": {"type": "array", "items": {"type": "string"}},
         "emoji": {"type": "string"},
     },
-    "required": ["speaker", "narration", "search_query", "image_prompt", "emphasis", "emoji"],
+    "required": ["speaker", "narration", "search_query", "image_prompt", "historical", "emphasis", "emoji"],
     "additionalProperties": False,
 }
 
@@ -130,6 +134,7 @@ class Scene:
     search_query: str
     image_prompt: str = ""
     speaker: str = "A"
+    historical: bool = False                           # True = a past scene (AI illustration), False = place today
     emphasis: list[str] = field(default_factory=list)  # words of the narration highlighted on screen
     emoji: str = ""                                    # one emoji popped in above the captions
 
@@ -184,14 +189,29 @@ def pick_style(settings: Settings, source: str) -> str:
         return settings.style
     if source == "trending":
         return "news"
-    if source in ("wikipedia", "reddit", "rss"):
+    if source in ("wikipedia", "rss"):
+        return "history"
+    if source == "reddit":
         return "story"
     return random.choice(AUTO_STYLES)
 
 
+HISTORY_MIN_SECONDS = 75          # the story format targets the middle of the 60-90s the user asked for
+HISTORY_RANGE = (60, 90)          # a history video must render within this many seconds
+
+
+def effective_seconds(style: str, target_seconds: int) -> int:
+    """The length actually written for a style. The story format targets ~75s (and never under 60), so it fits
+    a mystery, a human thread, a turning point and a calm payoff even when the global target is tuned shorter."""
+    return max(target_seconds, HISTORY_MIN_SECONDS) if style == "history" else target_seconds
+
+
 def scene_plan(style: str, target_seconds: int) -> tuple[int, int]:
     """(words, scenes) for a target length. Chat messages are short, so a chat has more of them."""
+    target_seconds = effective_seconds(style, target_seconds)
     words = int(target_seconds * WORDS_PER_SECOND)
+    if style == "history":
+        return words, max(6, min(12, round(target_seconds / 8.0)))   # longer, cinematic beats
     if style == "chat":
         return words, max(6, min(18, round(target_seconds / 2.8)))
     if style == "dialogue":
@@ -202,6 +222,13 @@ def scene_plan(style: str, target_seconds: int) -> tuple[int, int]:
 
 
 def _format_rules(style: str) -> str:
+    if style == "history":
+        return ("- speaker is always \"A\": one calm, cinematic narrator.\n"
+                "- Scene 1 narration IS the mystery question that opens the story (8-12 words, UNDER 60 "
+                "characters, no greeting), and the title is that exact question.\n"
+                "- Tell ONE human thread: who built it, who ruled or lost it, a rescue, a disappearance. Give a "
+                "clear turning point in the middle. Chronological and specific; ONLY well-established history — "
+                "never invent names, dates, numbers or quotes.\n")
     if style == "dialogue":
         return ("- Each scene is ONE line spoken by ONE person. Alternate speakers: A, B, A, B...\n"
                 "- cast: two short first names, [name of A, name of B]. Nobody says their own name.\n")
@@ -225,6 +252,27 @@ def build_prompt(subject: str, style: str, settings: Settings, avoid: list[str],
                  insights: str = "", keywords: str = "") -> tuple[str, str]:
     lang = LANGUAGES.get(settings.language, settings.language)
     words, n_scenes = scene_plan(style, settings.target_seconds)
+    eff = effective_seconds(style, settings.target_seconds)
+    history = style == "history"
+    ending = ("- The final scene is a calm, reflective payoff that answers the opening question; end gently (a "
+              "short, soft question is fine). Do NOT ask viewers to like, share, comment, subscribe or follow.\n"
+              if history else
+              "- The last scene lands the payoff, then a short call to action (max 8 words), e.g. asking viewers "
+              "to comment or follow.\n")
+    length_rule = ("- This is a 60-90 second video: write BETWEEN 165 and 235 words total, and never fewer than "
+                   "165.\n" if history else "")
+    visual_rules = (
+        "- search_query: 2-5 English words naming the real present-day place or landmark of that scene (e.g. "
+        "\"Hampi Virupaksha temple\", \"Vittala stone chariot\"), so a real photo of it can be found.\n"
+        "- image_prompt: for a PAST scene, one vivid English sentence recreating that historical moment — the "
+        "people, clothing and architecture as they were then — for a cinematic illustration. No text or letters.\n"
+        "- historical: true for a scene set in the PAST (people/events long ago), false for a scene showing the "
+        "place as it is TODAY (ruins, landscape, what a visitor sees now). Use a MIX of both.\n"
+        if history else
+        "- search_query: 1-4 English words describing concrete, filmable stock footage for that scene (e.g. "
+        "\"octopus underwater\", \"old library books\"). No abstract words.\n"
+        "- image_prompt: one vivid English sentence for an AI image of that scene, no text or letters in the image.\n"
+        "- historical: always false for this format.\n")
     system = (
         "You are a top YouTube Shorts scriptwriter and editor. You write fast, factual, highly "
         "re-watchable vertical videos. You reply with a single JSON object and nothing else."
@@ -233,6 +281,10 @@ def build_prompt(subject: str, style: str, settings: Settings, avoid: list[str],
     if avoid:
         avoid_block = "Do NOT repeat any of these recent videos:\n" + "\n".join(f"- {a}" for a in avoid[:40]) + "\n\n"
     ctx = f"Background information (use it, don't invent beyond it):\n{context.strip()}\n\n" if context else ""
+    if history and context:
+        ctx += ("Ground the story in that background ONLY: every factual claim — names, dates, numbers, events — "
+                "must come from it. If a detail is a tradition or legend not stated there, say \"legend says\" "
+                "or leave it out. Never invent a fact.\n\n")
     ins = f"{insights.strip()}\n\n" if insights else ""
     ins += f"{keywords.strip()}\n\n" if keywords else ""
     user = f"""Write one YouTube Short.
@@ -244,14 +296,11 @@ Audience: {settings.audience}
 Language: {lang} for narration, title, hook_text, cast and description. search_query and image_prompt are ALWAYS English.
 
 {ctx}{ins}{avoid_block}Rules:
-- Total narration about {words} words (~{settings.target_seconds} seconds spoken), split into about {n_scenes} scenes.
-{_format_rules(style)}- Scene 1 is the hook: a bold claim or question that stops the scroll in under 2 seconds. Never "In this video", never a greeting.
+- Total narration about {words} words (~{eff} seconds spoken), split into about {n_scenes} scenes.
+{length_rule}{_format_rules(style)}- Scene 1 is the hook: a bold claim or question that stops the scroll in under 2 seconds. Never "In this video", never a greeting.
 - Every line earns its place: concrete details, numbers, names. Only well-established facts; no made-up statistics.
-- The last scene lands the payoff, then a short call to action (max 8 words), e.g. asking viewers to comment or follow.
-- Narration is spoken by a voice: no emojis, hashtags, labels, brackets or stage directions.
-- search_query: 1-4 English words describing concrete, filmable stock footage for that scene (e.g. "octopus underwater", "old library books"). No abstract words.
-- image_prompt: one vivid English sentence for an AI image of that scene, no text or letters in the image.
-- emphasis: the 1-2 words of that scene's narration that carry it (a number, a name, the surprising word), copied exactly as written there. They are highlighted on screen; use [] when nothing stands out.
+{ending}- Narration is spoken by a voice: no emojis, hashtags, labels, brackets or stage directions.
+{visual_rules}- emphasis: the 1-2 words of that scene's narration that carry it (a number, a name, the surprising word), copied exactly as written there. They are highlighted on screen; use [] when nothing stands out.
 - emoji: ONE emoji that fits that scene, popped up on screen above the captions (e.g. 🐙 for an octopus, 🤯 for a twist), or "" when none fits. Never put emoji in the narration.
 - title: max 60 characters, curiosity-driven but honest, no hashtags, no quotes.
 - hook_text: max 6 words shown on screen during the first seconds.
@@ -259,7 +308,7 @@ Language: {lang} for narration, title, hook_text, cast and description. search_q
 - hashtags: 3-5 relevant hashtags. tags: 8-15 search keywords.
 - category: one of {", ".join(CATEGORIES)}.
 
-Return JSON with keys: topic, title, hook_text, cast, scenes (array of {{speaker, narration, search_query, image_prompt, emphasis, emoji}}), description, hashtags, tags, category."""
+Return JSON with keys: topic, title, hook_text, cast, scenes (array of {{speaker, narration, search_query, image_prompt, historical, emphasis, emoji}}), description, hashtags, tags, category."""
     return system, user
 
 
@@ -334,9 +383,22 @@ def normalize(data: dict, subject: str, style: str, language: str) -> Script:
         scenes.append(Scene(narration=narration, search_query=truncate_words(query, 60),
                             image_prompt=str(s.get("image_prompt") or query).strip(),
                             speaker=_speaker(s.get("speaker")) if multi else "A",
+                            historical=bool(s.get("historical")),
                             emphasis=_emphasis(s.get("emphasis"), narration), emoji=one_emoji(s.get("emoji"))))
     if not scenes:
         raise ValueError("script has no narration")
+    if style == "history" and scenes:
+        # A history video ends on a calm payoff, never a "like/share/follow" call to action. Strip a CTA the
+        # model tacked on — a trailing clause (joined by ; , — or "and") as well as a whole CTA sentence — as
+        # long as something reflective remains.
+        last = scenes[-1]
+        text = _CTA_TAIL.sub("", last.narration).strip(" ;:,.—–-")
+        kept = [p for p in re.split(r"(?<=[.!?])\s+", text) if p and not _CTA.search(p)]
+        cleaned = " ".join(kept).strip() or text
+        if cleaned:
+            if cleaned[-1] not in ".!?":
+                cleaned += "."
+            last.narration = clean_narration(cleaned)
     limit = 20 if style == "chat" else 12
     while len(scenes) > limit:  # merge the shortest same-speaker neighbours to keep cuts watchable
         pairs = [k for k in range(len(scenes) - 1) if scenes[k].speaker == scenes[k + 1].speaker]
@@ -348,7 +410,7 @@ def normalize(data: dict, subject: str, style: str, language: str) -> Script:
 
     title = re.sub(r"#\w+", "", strip_emoji(str(data.get("title") or subject)))
     title = re.sub(r"[<>\"“”]", "", title).strip(" '-:")
-    title = truncate_words(title or subject.title(), 90)
+    title = truncate_words(title or subject.title(), 60)   # keep titles under 60 characters
 
     hook = re.sub(r"[<>\"“”]", "", strip_emoji(str(data.get("hook_text") or ""))).strip()
     hook = truncate_words(hook, 48) if hook else truncate_words(title, 40)
@@ -418,7 +480,9 @@ def write_script(llm, subject: str, settings: Settings, *, source: str = "niche"
     if llm is None:
         return offline_script(subject, settings, style)
     system, user = build_prompt(subject, style, settings, avoid or [], context, insights, keywords)
-    data = llm.complete_json(system, user, SCRIPT_SCHEMA)
+    # The story format writes a longer script from a longer (grounded) prompt; reasoning models need extra
+    # completion-token headroom or they hit the limit before closing the JSON.
+    data = llm.complete_json(system, user, SCRIPT_SCHEMA, max_tokens=12000 if style == "history" else 4000)
     script = normalize(data, subject, style, settings.language)
     log.info("Script (%s, %d words, %d scenes): %s", style, word_count(script.narration, settings.language),
              len(script.scenes), script.title)
@@ -430,6 +494,9 @@ def write_script(llm, subject: str, settings: Settings, *, source: str = "niche"
 # --------------------------------------------------------------------------------------------------
 _GREETING = re.compile(r"^(hi|hey|hello|welcome|what'?s up|in this video|today (we|i|i'm|we're)|let'?s talk)\b", re.I)
 _CTA = re.compile(r"\b(follow|comment|subscribe|share|like|save|tell me|let me know|which one|would you)\b", re.I)
+# A call-to-action clause tacked onto the end of a line (after ; , — or "and"), e.g. "; subscribe for more".
+_CTA_TAIL = re.compile(r"[\s;:,.—–-]+(?:and\s+|so\s+|now\s+|then\s+|please\s+|don't forget to\s+|be sure to\s+)*"
+                       r"(follow|subscribe|like|share|comment|save|hit|smash|ring)\b.*$", re.I)
 _FILLER = re.compile(r"\b(basically|actually|literally|really|very|just|kind of|sort of|you know|honestly)\b", re.I)
 _NUMBER = re.compile(r"\d|\b(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|"
                      r"(thir|four|fif|six|seven|eigh|nine)teen|(twen|thir|for|fif|six|seven|eigh|nine)ty|"
@@ -437,6 +504,7 @@ _NUMBER = re.compile(r"\d|\b(one|two|three|four|five|six|seven|eight|nine|ten|el
 _COMMON = {"about", "after", "again", "because", "before", "being", "could", "every", "first", "their", "there",
            "these", "thing", "things", "those", "which", "while", "would", "other", "still", "where", "really"}
 FACTUAL_STYLES = {"facts", "listicle", "myth", "news", "explainer", "quiz"}
+CALM_STYLES = {"history"}          # a reflective payoff, not a "like and subscribe" call to action
 
 
 def lint_script(script: Script, settings: Settings) -> list[str]:
@@ -453,10 +521,17 @@ def lint_script(script: Script, settings: Settings) -> list[str]:
         out.append("The hook opens with a greeting or 'in this video' instead of the most interesting line.")
     target = scene_plan(script.style, settings.target_seconds)[0]
     n = word_count(script.narration, script.language)
-    if target and abs(n - target) > 0.25 * target:
+    if script.style == "history":
+        secs = n / WORDS_PER_SECOND
+        lo, hi = HISTORY_RANGE
+        if secs < lo:
+            out.append(f"About {n} words (~{secs:.0f}s); a history Short must run {lo}-{hi}s — expand to 165-235 words.")
+        elif secs > hi + 5:
+            out.append(f"About {n} words (~{secs:.0f}s); trim it to the {lo}-{hi}s range.")
+    elif target and abs(n - target) > 0.25 * target:
         out.append(f"About {n} words for a {settings.target_seconds}-second video (~{target} words fit).")
     ending = " ".join(sc.narration for sc in script.scenes[-2:])
-    if english and script.scenes and not (_CTA.search(ending) or "?" in ending):
+    if english and script.scenes and script.style not in CALM_STYLES and not (_CTA.search(ending) or "?" in ending):
         out.append("The ending has no call to action (comment, follow or a question).")
     if lang not in ("zh", "ja"):
         for k, sc in enumerate(script.scenes, 1):
@@ -566,7 +641,9 @@ def review_script(llm, script: Script, settings: Settings) -> Script:
     for round_no in range(1, max(1, settings.script_review_rounds) + 1):
         system, user = review_prompt(best, settings, rewrite=True, checks=lint_script(best, settings))
         try:
-            data = llm.complete_json(system, user, REVIEW_SCHEMA, max_tokens=5000, temperature=REVIEW_TEMPERATURE)
+            rewrite_tokens = 12000 if best.style == "history" else 5000   # a rewritten story is long; leave room
+            data = llm.complete_json(system, user, REVIEW_SCHEMA, max_tokens=rewrite_tokens,
+                                     temperature=REVIEW_TEMPERATURE)
         except Exception as e:
             log.warning("Script Doctor skipped: %s", e)
             break
@@ -644,6 +721,7 @@ Return the same JSON structure."""
         raise ValueError(f"translation to {language} has {len(out.scenes)} scenes, expected {len(script.scenes)}")
     for mine, theirs in zip(out.scenes, script.scenes):
         mine.search_query, mine.image_prompt, mine.speaker = theirs.search_query, theirs.image_prompt, theirs.speaker
+        mine.historical = theirs.historical
     out.category = script.category
     if script.style in CARD_STYLES:
         out.cast = list(script.cast)  # r/community and u/name are handles, not words to translate
