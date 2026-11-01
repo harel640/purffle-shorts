@@ -215,6 +215,34 @@ _SKIP_IMAGE_RE = re.compile(
 _PEOPLE_RE = re.compile(r"(?<![a-z])(portraits?|selfies?|close[ -]?ups?|headshots?|posing|mugshot)(?![a-z])", re.I)
 
 
+def _wiki_item(pg: dict, rank: int, min_px: int, query: str = "") -> MediaItem | None:
+    """Turn one Commons page (from search or geosearch) into a licensed MediaItem, or None when it is
+    non-free, too small, has no URL, or is a map/diagram/butchery image we never want as footage."""
+    info = (pg.get("imageinfo") or [{}])[0]
+    meta = info.get("extmetadata") or {}
+    ok, lic = _wiki_license_ok((meta.get("LicenseShortName") or {}).get("value", ""))
+    if not ok:
+        return None
+    w, h = int(info.get("width") or 0), int(info.get("height") or 0)
+    if min(w, h) < min_px:
+        return None
+    url = info.get("url") or info.get("thumburl")
+    if not url:
+        return None
+    title = pg.get("title", "")
+    page_url = info.get("descriptionurl") or f"https://commons.wikimedia.org/wiki/{quote(title.replace(' ', '_'))}"
+    author = _wiki_author((meta.get("Artist") or {}).get("value", ""))
+    lic_url = (meta.get("LicenseUrl") or {}).get("value", "")
+    obj = _TAG_RE.sub(" ", (meta.get("ObjectName") or {}).get("value", "") or "")
+    cats = (meta.get("Categories") or {}).get("value", "")
+    if _SKIP_IMAGE_RE.search(f"{title} {obj} {cats}"):          # a map/diagram or butchery/carcass image
+        return None
+    return MediaItem("wikimedia", str(pg.get("pageid") or title), "image", url=url, width=w, height=h,
+                     credit=author, author=author, license=lic, license_url=lic_url, page_url=page_url,
+                     query=query, rank=rank, text=f"{title} {obj} {cats}".strip(),
+                     extra={"wiki_title": _wiki_title(title)})
+
+
 def wikimedia_images(query: str, limit: int = 20, min_px: int = 800) -> list[MediaItem]:
     """Freely-licensed (public-domain / CC-BY / CC-BY-SA) photos of ``query`` from Wikimedia Commons.
     Author and license are captured on each item so the video can credit them as the licenses require.
@@ -227,29 +255,28 @@ def wikimedia_images(query: str, limit: int = 20, min_px: int = 800) -> list[Med
     pages = (r.json().get("query") or {}).get("pages") or []
     items: list[MediaItem] = []
     for rank, pg in enumerate(sorted(pages, key=lambda p: p.get("index", 999))):
-        info = (pg.get("imageinfo") or [{}])[0]
-        meta = info.get("extmetadata") or {}
-        ok, lic = _wiki_license_ok((meta.get("LicenseShortName") or {}).get("value", ""))
-        if not ok:
-            continue
-        w, h = int(info.get("width") or 0), int(info.get("height") or 0)
-        if min(w, h) < min_px:
-            continue
-        url = info.get("url") or info.get("thumburl")
-        if not url:
-            continue
-        title = pg.get("title", "")
-        page_url = info.get("descriptionurl") or f"https://commons.wikimedia.org/wiki/{quote(title.replace(' ', '_'))}"
-        author = _wiki_author((meta.get("Artist") or {}).get("value", ""))
-        lic_url = (meta.get("LicenseUrl") or {}).get("value", "")
-        obj = _TAG_RE.sub(" ", (meta.get("ObjectName") or {}).get("value", "") or "")
-        cats = (meta.get("Categories") or {}).get("value", "")
-        if _SKIP_IMAGE_RE.search(f"{title} {obj} {cats}"):      # a map/diagram or butchery/carcass image
-            continue
-        items.append(MediaItem("wikimedia", str(pg.get("pageid") or title), "image", url=url, width=w, height=h,
-                               credit=author, author=author, license=lic, license_url=lic_url, page_url=page_url,
-                               query=query, rank=rank, text=f"{title} {obj} {cats}".strip(),
-                               extra={"wiki_title": _wiki_title(title)}))
+        it = _wiki_item(pg, rank, min_px, query)
+        if it is not None:
+            items.append(it)
+    return items
+
+
+def geosearch_images(lat: float, lon: float, radius_m: int = 5000, limit: int = 40,
+                     min_px: int = 800) -> list[MediaItem]:
+    """Freely-licensed Commons photos geotagged within ``radius_m`` of (lat, lon). For a small or obscure
+    place, a name search returns little or the wrong place; geosearch finds the photos actually taken there."""
+    r = http().get(_WIKI_API, timeout=30, headers={"User-Agent": _WIKI_UA}, params={
+        "action": "query", "format": "json", "formatversion": 2,
+        "generator": "geosearch", "ggscoord": f"{lat}|{lon}", "ggsradius": int(max(10, min(10000, radius_m))),
+        "ggsnamespace": 6, "ggslimit": limit,
+        "prop": "imageinfo", "iiprop": "url|size|extmetadata", "iiurlwidth": 1600})
+    raise_for_status(r, "Wikimedia geosearch")
+    pages = (r.json().get("query") or {}).get("pages") or []
+    items: list[MediaItem] = []
+    for rank, pg in enumerate(sorted(pages, key=lambda p: p.get("index", 999))):
+        it = _wiki_item(pg, rank, min_px, query="")
+        if it is not None:
+            items.append(it)
     return items
 
 
@@ -354,9 +381,37 @@ _ARCHITECTURE = {
 }
 
 
-def _architecture_hint(place: str, country: str) -> str:
+# Architecture cues keyed by distinctive words in the place's own Wikipedia text (checked BEFORE the country
+# fallback), so a Himalayan village is drawn as stacked timber houses, not a South Indian gopuram.
+_ARCH_BY_KEYWORD = [
+    (re.compile(r"kath[\s-]?kuni|cator and cribbage|himachal|kinnaur|spiti|kullu|parvati valley|himalay", re.I),
+     "Himalayan kath-kuni architecture: stacked timber-and-stone houses with carved wooden balconies and "
+     "slate roofs, pine forests and snow peaks behind, no domes"),
+    (re.compile(r"\bstepwell|step well|\bbaori\b|\bbaoli\b|\bvav\b", re.I),
+     "Indian stepwell architecture: carved stone steps descending into an underground water tank, no domes"),
+    (re.compile(r"\bhaveli", re.I),
+     "Rajasthani haveli architecture: carved sandstone townhouses with jharokha balconies, no domes"),
+    (re.compile(r"\bdzong\b", re.I),
+     "Bhutanese dzong architecture: fortress-monasteries with sloping whitewashed walls and timber galleries, no domes"),
+    (re.compile(r"stilt house|longhouse|bamboo house|tribal village|thatched", re.I),
+     "timber-and-bamboo stilt houses with thatched roofs, no domes, no modern structures"),
+    (re.compile(r"\bhanok\b", re.I),
+     "Korean hanok architecture: timber houses with gently curved tiled roofs, no domes"),
+    (re.compile(r"rock[\s-]?cut|cave temple|monolith|caves?\b", re.I),
+     "Indian rock-cut cave architecture: pillared halls and shrines carved into living stone cliffs, no domes"),
+    (re.compile(r"\bminaret|\bmosque|\bmadrasa|\bcaravanserai|silk road", re.I),
+     "Central Asian Islamic architecture: tiled iwans, minarets and glazed blue domes typical of the region"),
+]
+
+
+def _architecture_hint(place: str, country: str, article: str = "") -> str:
     """A place-appropriate architecture cue for AI illustrations, so a Khmer ruin isn't drawn like a Greek
-    temple. Depends on the place (keyed by country); a neutral, non-anachronistic cue otherwise."""
+    temple and a Himalayan village isn't drawn with gopurams. Derived from the Wikipedia text and region
+    first, then the country; a neutral, non-anachronistic cue otherwise."""
+    region = f"{place} {country} {article}".lower()
+    for rx, hint in _ARCH_BY_KEYWORD:
+        if rx.search(region):
+            return hint
     blob = f"{place} {country}".lower()
     for key, hint in _ARCHITECTURE.items():
         if re.search(rf"(?<![a-z]){re.escape(key)}(?![a-z])", blob):
@@ -436,6 +491,25 @@ def _score(item: MediaItem, need: float, orientation: str = "portrait", query: s
 # Nature/filler words that, on their own, mean a weak "empty field / plain wall / lone tree" shot.
 _GENERIC_WORDS = {"field", "fields", "grass", "tree", "trees", "wall", "sky", "road", "roads", "meadow",
                   "lawn", "bush", "bushes", "fence", "cloud", "clouds", "street", "path", "forest", "garden"}
+
+# Generic words dropped when deciding whether an image's title actually NAMES the place.
+_PLACE_STOP = {"the", "of", "and", "town", "city", "village", "temple", "temples", "fort", "ruins", "ruin",
+               "valley", "river", "lake", "mount", "hill", "national", "park", "old", "ancient", "india",
+               "view", "near", "road", "street"}
+
+
+def _place_name_tokens(place: str, country: str) -> set[str]:
+    """Distinctive (non-generic) tokens of a place name, used to accept only Commons images whose own title
+    names the place — so a keyword search can't slip in a photo of somewhere else."""
+    return {_stem(w) for w in re.findall(r"[a-z]+", f"{place} {country}".lower())
+            if len(w) > 2 and w not in _PLACE_STOP}
+
+
+def _names_place(item: MediaItem, place_tokens: set[str]) -> bool:
+    if not place_tokens:
+        return False
+    have = {_stem(w) for w in re.findall(r"[a-z]+", (item.text or "").lower())}
+    return bool(place_tokens & have)
 
 
 def _wiki_rank(item: MediaItem, query: str, script_terms: set[str], avoid: set[str] | None = None) -> float:
@@ -736,49 +810,71 @@ class Visuals:
         log.info("Scene %d: %s AI illustration (historical)", idx + 1, src)
         return MediaItem(src, dest.name, "image", width=w, height=h, path=dest, query=prompt)
 
-    def for_place_scenes(self, jobs: list[tuple[str, str, bool]], place: str, country: str, dest_dir: Path,
-                         progress=None, min_images: int = 5) -> list[MediaItem]:
-        """One image per scene of the named place: a freely-licensed Wikimedia photo for scenes about the place
-        TODAY, and a consistent-style AI illustration for scenes marked historical (the past can't be
-        photographed). Raises SkipTopic if the place has fewer than ``min_images`` freely-licensed photos, so a
-        video is never built about a place we can't actually document. Stock video is a place-named fallback."""
-        dest_dir.mkdir(parents=True, exist_ok=True)
+    def _place_pool(self, place: str, country: str, lat: float | None, lon: float | None,
+                    min_images: int) -> list[MediaItem]:
+        """Freely-licensed, PLACE-ACCURATE Commons photos: everything geotagged within ~5 km of the place,
+        plus name-search hits whose own title names the place. A keyword search alone drifts to look-alike
+        places, so both gates are place-specific. Raises SkipTopic below ``min_images``."""
         pc = ", ".join(x for x in (place, country) if x)
+        place_tokens = _place_name_tokens(place, country)
         pool, seen = [], set()
-        for q in dict.fromkeys([x for x in (pc, place, f"{place} temple", f"{place} landscape") if x]):
+        near = 0
+        if lat is not None and lon is not None:                # within ~5 km of the place's coordinates
+            try:
+                for it in geosearch_images(lat, lon, 5000):
+                    if it.key not in seen:
+                        seen.add(it.key)
+                        pool.append(it)
+                        near += 1
+            except Exception as e:
+                log.warning("Wikimedia geosearch failed: %s", redact(e))
+        for q in dict.fromkeys([x for x in (pc, place, f"{place} {country}") if x]):   # name search, title must match
             for it in self._wiki_search(q):
-                if it.key not in seen:
+                if it.key not in seen and _names_place(it, place_tokens):
                     seen.add(it.key)
                     pool.append(it)
-        log.info("Wikimedia: %d freely-licensed image(s) for %s", len(pool), pc or place)
+        log.info("Wikimedia: %d place-accurate image(s) for %s (%d within 5 km%s)", len(pool), pc or place,
+                 near, "" if lat is not None else "; no coordinates, titles only")
         if len(pool) < min_images:
-            raise SkipTopic(f"only {len(pool)} freely-licensed Wikimedia image(s) for '{pc or place}'; "
+            raise SkipTopic(f"only {len(pool)} place-accurate Wikimedia image(s) for '{pc or place}'; "
                             f"need {min_images}")
+        return pool
+
+    def for_place_scenes(self, jobs: list[tuple[str, str, bool]], place: str, country: str, dest_dir: Path,
+                         progress=None, min_images: int = 5, lat: float | None = None, lon: float | None = None,
+                         article: str = "") -> list[MediaItem]:
+        """One image per scene of the named place: a freely-licensed Wikimedia photo for scenes about the place
+        TODAY, and a consistent-style AI illustration for scenes marked historical (the past can't be
+        photographed). Only place-accurate photos are used (geosearch within ~5 km, or a title that names the
+        place); raises SkipTopic if there are fewer than ``min_images``. No image is shown for more than two
+        scenes in a row. Stock video is a place-named fallback."""
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        pool = self._place_pool(place, country, lat, lon, min_images)
         # Landmarks/place the script talks about: used to prefer images whose titles name them.
         script_terms = _terms(place) | _terms(country)
         for q, _p, _h in jobs:
             script_terms |= _terms(q)
-        arch = _architecture_hint(place, country)              # draw the past in THIS place's architecture
+        arch = _architecture_hint(place, country, article)     # draw the past in THIS place's architecture/region
         results: list[MediaItem] = []
         chosen: set[str] = set()                               # distinctive subjects already shown this video
+        prev_key, consec = None, 0
         for i, (q, prompt, historical) in enumerate(jobs):
             item = self._historical_image(prompt or q, dest_dir, i, arch) if historical else None
             if item is None:                                   # place-today scene, or AI unavailable/failed
-                item = self._good_wiki(self._wiki_search(f"{q} {place}") + pool, q, script_terms, dest_dir, i,
-                                       avoid=chosen)
+                item = self._good_wiki(pool, q, script_terms, dest_dir, i, avoid=chosen)
             if item is None:                                   # no fresh place image -> place-named stock video
                 item = self._place_stock_video(q, place, country, dest_dir, i)
             if item is None:                                   # last resort: an unused place photo (never a repeat)
-                with self.lock:
-                    unused = [c for c in pool if c.key not in self.used] or pool
-                    best = max(unused, key=lambda c: _wiki_rank(c, q, script_terms, chosen))
-                    self.used.add(best.key)
-                item = replace(best)
-                try:
-                    self._fetch(item, dest_dir, i)
-                except Exception as e:
-                    log.warning("Wikimedia reuse download failed (%s)", redact(e))
-                    item = MediaItem("generated", f"gradient-{i}", "generated", query=q)
+                item = self._reuse_place_image(pool, q, script_terms, chosen, dest_dir, i, exclude=None)
+            # Never show the same image for more than two scenes in a row: swap in a different pool photo.
+            if item is not None and item.key == prev_key and consec >= 2:
+                alt = self._reuse_place_image(pool, q, script_terms, chosen, dest_dir, i, exclude=item.key)
+                if alt is not None:
+                    item = alt
+            if item is None:
+                item = MediaItem("generated", f"gradient-{i}", "generated", query=q)
+            consec = consec + 1 if item.key == prev_key else 1
+            prev_key = item.key
             if item.source == "wikimedia":                     # remember its subject so later scenes differ
                 chosen |= (_terms(item.text) - script_terms)
             self._record_credit(item)
@@ -787,6 +883,26 @@ class Visuals:
             if progress:
                 progress((i + 1) / len(jobs))
         return results
+
+    def _reuse_place_image(self, pool: list[MediaItem], query: str, script_terms: set[str], chosen: set[str],
+                           dest_dir: Path, idx: int, exclude: str | None) -> MediaItem | None:
+        """Pick a pool photo for this scene, preferring one not used yet and never ``exclude`` (the image shown
+        on the two previous scenes). Downloads it; returns None only if the pool is empty of alternatives."""
+        with self.lock:
+            cands = [c for c in pool if c.key != exclude]
+            unused = [c for c in cands if c.key not in self.used]
+            pick_from = unused or cands
+            if not pick_from:
+                return None
+            best = max(pick_from, key=lambda c: _wiki_rank(c, query, script_terms, chosen))
+            self.used.add(best.key)
+        item = replace(best)
+        try:
+            self._fetch(item, dest_dir, idx)
+        except Exception as e:
+            log.warning("Wikimedia reuse download failed (%s)", redact(e))
+            return None
+        return item
 
     def for_scene(self, idx: int, query: str, image_prompt: str, topic: str, need: float, dest_dir: Path) -> MediaItem:
         queries = []

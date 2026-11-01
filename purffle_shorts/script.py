@@ -33,6 +33,10 @@ STYLES = {
     "history": "A story-driven mini-documentary about one real place: open on a mystery question, follow one "
                "human thread (the builders, a ruler, a rescue, a disappearance) to a turning point, and land a "
                "calm, reflective payoff. Cinematic and unhurried — a story, never a list of facts.",
+    "place": "A story-driven portrait of one real place AS IT IS TODAY: open on a mystery question, then reveal "
+             "what makes this place special — its setting and landscape, how it looks and feels, the life and "
+             "culture around it, and any local legend — and land a calm, reflective payoff. Cinematic and "
+             "unhurried, built only on what a visitor can actually see; no invented or dated history.",
     "listicle": "A top-3 countdown (number 3, number 2, number 1) where number 1 is the most surprising.",
     "myth": "Myth vs. fact: state a belief most people hold, then bust it with clear evidence.",
     "quiz": "Open with a question the viewer will try to answer, build suspense, reveal the answer at the end.",
@@ -49,6 +53,9 @@ STYLES = {
 }
 MULTI_SPEAKER = {"dialogue", "chat"}
 CARD_STYLES = {"reddit"}                  # single narrator, but the cast names the community and the poster
+# Place-locked story formats: a calm, unhurried narration about one real place (60-90s, no CTA). "history"
+# adds AI-illustrated past scenes; "place" is present-day only, real photos, for places without real history.
+STORY_STYLES = {"history", "place"}
 AUTO_STYLES = ["facts", "facts", "story", "story", "listicle", "myth", "quiz", "explainer"]
 DEFAULT_CAST = {"dialogue": ["Alex", "Sam"], "chat": ["Unknown", "Me"], "reddit": ["r/stories", "u/throwaway"]}
 
@@ -203,14 +210,14 @@ HISTORY_RANGE = (60, 90)          # a history video must render within this many
 def effective_seconds(style: str, target_seconds: int) -> int:
     """The length actually written for a style. The story format targets ~75s (and never under 60), so it fits
     a mystery, a human thread, a turning point and a calm payoff even when the global target is tuned shorter."""
-    return max(target_seconds, HISTORY_MIN_SECONDS) if style == "history" else target_seconds
+    return max(target_seconds, HISTORY_MIN_SECONDS) if style in STORY_STYLES else target_seconds
 
 
 def scene_plan(style: str, target_seconds: int) -> tuple[int, int]:
     """(words, scenes) for a target length. Chat messages are short, so a chat has more of them."""
     target_seconds = effective_seconds(style, target_seconds)
     words = int(target_seconds * WORDS_PER_SECOND)
-    if style == "history":
+    if style in STORY_STYLES:
         return words, max(6, min(12, round(target_seconds / 8.0)))   # longer, cinematic beats
     if style == "chat":
         return words, max(6, min(18, round(target_seconds / 2.8)))
@@ -229,6 +236,14 @@ def _format_rules(style: str) -> str:
                 "- Tell ONE human thread: who built it, who ruled or lost it, a rescue, a disappearance. Give a "
                 "clear turning point in the middle. Chronological and specific; ONLY well-established history — "
                 "never invent names, dates, numbers or quotes.\n")
+    if style == "place":
+        return ("- speaker is always \"A\": one calm, cinematic narrator.\n"
+                "- Scene 1 narration IS the mystery question that opens the story (8-12 words, UNDER 60 "
+                "characters, no greeting), and the title is that exact question.\n"
+                "- Reveal what makes THIS place special TODAY: its setting and landscape, how it looks and "
+                "feels, the life and culture around it, and any local legend (say \"legend says\"). Do NOT "
+                "narrate dated historical events, rulers, battles, dynasties or founding dates — describe the "
+                "place a visitor sees now.\n")
     if style == "dialogue":
         return ("- Each scene is ONE line spoken by ONE person. Alternate speakers: A, B, A, B...\n"
                 "- cast: two short first names, [name of A, name of B]. Nobody says their own name.\n")
@@ -254,25 +269,35 @@ def build_prompt(subject: str, style: str, settings: Settings, avoid: list[str],
     words, n_scenes = scene_plan(style, settings.target_seconds)
     eff = effective_seconds(style, settings.target_seconds)
     history = style == "history"
+    story = style in STORY_STYLES
     ending = ("- The final scene is a calm, reflective payoff that answers the opening question; end gently (a "
               "short, soft question is fine). Do NOT ask viewers to like, share, comment, subscribe or follow.\n"
-              if history else
+              if story else
               "- The last scene lands the payoff, then a short call to action (max 8 words), e.g. asking viewers "
               "to comment or follow.\n")
     length_rule = ("- This is a 60-90 second video: write BETWEEN 165 and 235 words total, and never fewer than "
-                   "165.\n" if history else "")
-    visual_rules = (
-        "- search_query: 2-5 English words naming the real present-day place or landmark of that scene (e.g. "
-        "\"Hampi Virupaksha temple\", \"Vittala stone chariot\"), so a real photo of it can be found.\n"
-        "- image_prompt: for a PAST scene, one vivid English sentence recreating that historical moment — the "
-        "people, clothing and architecture as they were then — for a cinematic illustration. No text or letters.\n"
-        "- historical: true for a scene set in the PAST (people/events long ago), false for a scene showing the "
-        "place as it is TODAY (ruins, landscape, what a visitor sees now). Use a MIX of both.\n"
-        if history else
-        "- search_query: 1-4 English words describing concrete, filmable stock footage for that scene (e.g. "
-        "\"octopus underwater\", \"old library books\"). No abstract words.\n"
-        "- image_prompt: one vivid English sentence for an AI image of that scene, no text or letters in the image.\n"
-        "- historical: always false for this format.\n")
+                   "165.\n" if story else "")
+    if history:
+        visual_rules = (
+            "- search_query: 2-5 English words naming the real present-day place or landmark of that scene (e.g. "
+            "\"Hampi Virupaksha temple\", \"Vittala stone chariot\"), so a real photo of it can be found.\n"
+            "- image_prompt: for a PAST scene, one vivid English sentence recreating that historical moment — the "
+            "people, clothing and architecture as they were then — for a cinematic illustration. No text or letters.\n"
+            "- historical: true for a scene set in the PAST (people/events long ago), false for a scene showing the "
+            "place as it is TODAY (ruins, landscape, what a visitor sees now). Use a MIX of both.\n")
+    elif style == "place":
+        visual_rules = (
+            "- search_query: 2-5 English words naming the real present-day place, landmark or landscape of that "
+            "scene (e.g. \"Pulga village Himachal\", \"Parvati valley pine forest\"), so a real photo of it can "
+            "be found.\n"
+            "- image_prompt: repeat the same present-day place words (no AI image is generated for this format).\n"
+            "- historical: ALWAYS false for this format — every scene shows the place as it is today.\n")
+    else:
+        visual_rules = (
+            "- search_query: 1-4 English words describing concrete, filmable stock footage for that scene (e.g. "
+            "\"octopus underwater\", \"old library books\"). No abstract words.\n"
+            "- image_prompt: one vivid English sentence for an AI image of that scene, no text or letters in the image.\n"
+            "- historical: always false for this format.\n")
     system = (
         "You are a top YouTube Shorts scriptwriter and editor. You write fast, factual, highly "
         "re-watchable vertical videos. You reply with a single JSON object and nothing else."
@@ -281,7 +306,7 @@ def build_prompt(subject: str, style: str, settings: Settings, avoid: list[str],
     if avoid:
         avoid_block = "Do NOT repeat any of these recent videos:\n" + "\n".join(f"- {a}" for a in avoid[:40]) + "\n\n"
     ctx = f"Background information (use it, don't invent beyond it):\n{context.strip()}\n\n" if context else ""
-    if history and context:
+    if story and context:
         ctx += ("Ground the story in that background ONLY: every factual claim — names, dates, numbers, events — "
                 "must come from it. If a detail is a tradition or legend not stated there, say \"legend says\" "
                 "or leave it out. Never invent a fact.\n\n")
@@ -387,8 +412,8 @@ def normalize(data: dict, subject: str, style: str, language: str) -> Script:
                             emphasis=_emphasis(s.get("emphasis"), narration), emoji=one_emoji(s.get("emoji"))))
     if not scenes:
         raise ValueError("script has no narration")
-    if style == "history" and scenes:
-        # A history video ends on a calm payoff, never a "like/share/follow" call to action. Strip a CTA the
+    if style in STORY_STYLES and scenes:
+        # A story video ends on a calm payoff, never a "like/share/follow" call to action. Strip a CTA the
         # model tacked on — a trailing clause (joined by ; , — or "and") as well as a whole CTA sentence — as
         # long as something reflective remains.
         last = scenes[-1]
@@ -482,7 +507,7 @@ def write_script(llm, subject: str, settings: Settings, *, source: str = "niche"
     system, user = build_prompt(subject, style, settings, avoid or [], context, insights, keywords)
     # The story format writes a longer script from a longer (grounded) prompt; reasoning models need extra
     # completion-token headroom or they hit the limit before closing the JSON.
-    data = llm.complete_json(system, user, SCRIPT_SCHEMA, max_tokens=12000 if style == "history" else 4000)
+    data = llm.complete_json(system, user, SCRIPT_SCHEMA, max_tokens=12000 if style in STORY_STYLES else 4000)
     script = normalize(data, subject, style, settings.language)
     log.info("Script (%s, %d words, %d scenes): %s", style, word_count(script.narration, settings.language),
              len(script.scenes), script.title)
@@ -504,7 +529,7 @@ _NUMBER = re.compile(r"\d|\b(one|two|three|four|five|six|seven|eight|nine|ten|el
 _COMMON = {"about", "after", "again", "because", "before", "being", "could", "every", "first", "their", "there",
            "these", "thing", "things", "those", "which", "while", "would", "other", "still", "where", "really"}
 FACTUAL_STYLES = {"facts", "listicle", "myth", "news", "explainer", "quiz"}
-CALM_STYLES = {"history"}          # a reflective payoff, not a "like and subscribe" call to action
+CALM_STYLES = STORY_STYLES         # a reflective payoff, not a "like and subscribe" call to action
 
 
 def lint_script(script: Script, settings: Settings) -> list[str]:
@@ -521,11 +546,11 @@ def lint_script(script: Script, settings: Settings) -> list[str]:
         out.append("The hook opens with a greeting or 'in this video' instead of the most interesting line.")
     target = scene_plan(script.style, settings.target_seconds)[0]
     n = word_count(script.narration, script.language)
-    if script.style == "history":
+    if script.style in STORY_STYLES:
         secs = n / WORDS_PER_SECOND
         lo, hi = HISTORY_RANGE
         if secs < lo:
-            out.append(f"About {n} words (~{secs:.0f}s); a history Short must run {lo}-{hi}s — expand to 165-235 words.")
+            out.append(f"About {n} words (~{secs:.0f}s); a {script.style} Short must run {lo}-{hi}s — expand to 165-235 words.")
         elif secs > hi + 5:
             out.append(f"About {n} words (~{secs:.0f}s); trim it to the {lo}-{hi}s range.")
     elif target and abs(n - target) > 0.25 * target:
@@ -641,7 +666,7 @@ def review_script(llm, script: Script, settings: Settings) -> Script:
     for round_no in range(1, max(1, settings.script_review_rounds) + 1):
         system, user = review_prompt(best, settings, rewrite=True, checks=lint_script(best, settings))
         try:
-            rewrite_tokens = 12000 if best.style == "history" else 5000   # a rewritten story is long; leave room
+            rewrite_tokens = 12000 if best.style in STORY_STYLES else 5000   # a rewritten story is long; leave room
             data = llm.complete_json(system, user, REVIEW_SCHEMA, max_tokens=rewrite_tokens,
                                      temperature=REVIEW_TEMPERATURE)
         except Exception as e:
