@@ -68,6 +68,33 @@ def with_retries(
     raise RuntimeError("unreachable")
 
 
+def run_with_timeout(fn: Callable[[], T], seconds: float, label: str = "operation") -> T:
+    """Run ``fn`` in a background thread and give up on it after ``seconds``.
+
+    A network library that ignores its own timeouts can still wedge a run forever: edge-tts has
+    stalled on a half-open websocket at 0% CPU with no error and no data, outliving its own
+    connect/receive timeouts. This puts a hard ceiling on any single call so the step fails fast and
+    can be retried. The worker is a daemon thread, so an abandoned (still-hung) call never blocks the
+    process from exiting. Raises TimeoutError on overrun (retryable); otherwise returns ``fn``'s
+    result or re-raises whatever it raised."""
+    box: dict[str, object] = {}
+
+    def _worker() -> None:
+        try:
+            box["ok"] = fn()
+        except BaseException as e:  # noqa: BLE001 — carried across the thread boundary and re-raised below
+            box["err"] = e
+
+    t = threading.Thread(target=_worker, name=f"timeout:{label}", daemon=True)
+    t.start()
+    t.join(seconds)
+    if t.is_alive():
+        raise TimeoutError(f"{label} exceeded {seconds:.0f}s")
+    if "err" in box:
+        raise box["err"]  # type: ignore[misc]
+    return box["ok"]  # type: ignore[return-value]
+
+
 _session: requests.Session | None = None
 
 
@@ -92,9 +119,14 @@ def raise_for_status(resp: requests.Response, what: str) -> None:
     raise RuntimeError(msg)
 
 
-def download(url: str, dest: Path, *, headers: dict | None = None, timeout: int = 60,
+def download(url: str, dest: Path, *, headers: dict | None = None,
+             timeout: tuple[int, int] | int = (10, 60),
              max_bytes: int = 400 * 1024 * 1024) -> Path:
-    """Stream ``url`` to ``dest`` atomically (via a .part file), with retries."""
+    """Stream ``url`` to ``dest`` atomically (via a .part file), with retries.
+
+    ``timeout`` is a (connect, read) pair so a dead host fails the connect in seconds and a server
+    that opens the socket then goes silent fails the read, instead of hanging the job. A bare int
+    sets both phases to the same value (what ``requests`` already did)."""
     dest.parent.mkdir(parents=True, exist_ok=True)
 
     def _do() -> Path:
