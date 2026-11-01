@@ -9,7 +9,7 @@ import sqlite3
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 SCHEMA = """
@@ -45,6 +45,7 @@ VIDEO_COLUMNS = {
     "score": "INTEGER",            # Script Doctor retention score, 0-100
     "parent_id": "INTEGER",        # the original video when this one is a translated copy
     "views": "INTEGER", "likes": "INTEGER", "comments": "INTEGER", "stats_at": "TEXT",
+    "resolved_place": "TEXT",      # the real place a video resolved to (for place-based de-duplication)
 }
 
 
@@ -117,6 +118,12 @@ class History:
     def recent_titles(self, limit: int = 40) -> list[str]:
         return [r["title"] for r in self._all(
             "SELECT title FROM videos WHERE title IS NOT NULL ORDER BY id DESC LIMIT ?", (limit,))]
+
+    def recent_places(self, days: int = 90) -> list[str]:
+        """Resolved places of videos made in the last ``days`` days, so a place isn't repeated too soon."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat(timespec="seconds")
+        return [r["resolved_place"] for r in self._all(
+            "SELECT resolved_place FROM videos WHERE resolved_place IS NOT NULL AND created_at >= ?", (cutoff,))]
 
     def pending_uploads(self, statuses: tuple[str, ...] = ("queued",)) -> list[dict]:
         """queued = deferred by the daily quota; rendered = made with --no-upload."""
