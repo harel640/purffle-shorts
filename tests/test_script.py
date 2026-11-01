@@ -71,10 +71,10 @@ def test_prompt_mentions_language_and_length():
 
 def test_history_style_is_story_driven_and_longer():
     assert "history" in STYLES
-    # The story format is clamped to at least 60s even when the global target is tuned shorter.
+    # The story format targets ~50s (45-60s window) even when the global target is tuned shorter.
     words, n = scene_plan("history", 40)
-    assert words >= int(60 * 2.6) and 6 <= n <= 12
-    assert effective_seconds("history", 40) == 75 and effective_seconds("history", 90) == 90
+    assert words >= int(45 * 2.6) and 6 <= n <= 12
+    assert effective_seconds("history", 40) == 50 and effective_seconds("history", 90) == 90
     assert effective_seconds("facts", 40) == 40
 
 
@@ -105,10 +105,10 @@ def test_history_enforces_length_and_strips_cta():
          "search_query": "x", "image_prompt": "p", "historical": True}]}
     s2 = normalize(data2, "City", "history", "en")
     assert "subscribe" not in s2.scenes[-1].narration.lower() and "glittered and fell" in s2.scenes[-1].narration
-    # A too-short history script is flagged so the Script Doctor expands it into the 60-90s range.
+    # A too-short history script is flagged so the Script Doctor expands it into the 45-60s range.
     short = normalize({"scenes": [{"narration": "A short tale about a city.", "search_query": "x",
                                    "image_prompt": "p"}]}, "City", "history", "en")
-    assert any("60-90" in f or "expand" in f for f in lint_script(short, Settings()))
+    assert any("45-60" in f or "expand" in f for f in lint_script(short, Settings()))
 
 
 def test_title_is_capped_under_60_chars():

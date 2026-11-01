@@ -78,8 +78,8 @@ def test_geosearch_images_sends_coords_and_filters_license(monkeypatch):
     assert seen["generator"] == "geosearch" and seen["ggscoord"] == "32.0|77.3" and seen["ggsradius"] == 5000
 
 
-def _wimg(key_id, text):
-    return MediaItem("wikimedia", key_id, "image", url=f"https://c/{key_id}.jpg", width=1600, height=1200,
+def _wimg(key_id, text, w=1600, h=1200):
+    return MediaItem("wikimedia", key_id, "image", url=f"https://c/{key_id}.jpg", width=w, height=h,
                      author=f"Author {key_id}", license="CC BY-SA 4.0", license_url="https://cc/by-sa",
                      page_url=f"https://commons/{key_id}", text=text, extra={"wiki_title": text})
 
@@ -135,13 +135,34 @@ def test_place_style_is_a_present_day_story_with_no_ai_and_no_cta():
     _, user = SC.build_prompt("Pulga village", "place", Settings(), avoid=[], context="")
     assert "ALWAYS false" in user                            # every scene is present-day
     assert "no AI image is generated" in user
-    assert "Do NOT ask viewers to like" in user              # calm payoff, no call to action
-    assert "165 and 235 words" in user                       # 60-90 seconds like history
+    assert "open question to the viewer" in user and "Never ask them to like" in user  # open question, no CTA
+    assert "115 and 155 words" in user                       # 45-60 seconds like history
 
 
 def test_place_style_uses_story_length_and_scene_count():
     assert SC.effective_seconds("place", 40) == SC.HISTORY_MIN_SECONDS
     assert SC.scene_plan("place", 75)[1] >= 6
+
+
+def test_story_length_targets_45_to_60_seconds_and_a_tight_middle():
+    assert SC.HISTORY_RANGE == (45, 60)
+    assert SC.effective_seconds("history", 40) == 50 and SC.effective_seconds("place", 40) == 50
+    _, user = SC.build_prompt("Hampi", "history", Settings(), avoid=[], context="x")
+    assert "45-60 second" in user and "115 and 155" in user
+    assert "no lists of rulers" in user
+
+
+def test_story_ending_keeps_an_open_question_but_strips_platform_cta():
+    data = {"topic": "Gokarna", "title": "Why does Gokarna hide a secret?", "hook_text": "",
+            "scenes": [{"narration": "A temple stands by the sea.", "search_query": "gokarna",
+                        "image_prompt": "gokarna", "historical": False},
+                       {"narration": "Gokarna still guards its secret. Which temple would you visit? "
+                                     "Like and subscribe for more!",
+                        "search_query": "gokarna temple", "image_prompt": "x", "historical": False}],
+            "description": "d", "hashtags": ["#a"], "tags": ["t"], "category": "education"}
+    last = SC.normalize(data, "Gokarna", "history", "en").scenes[-1].narration.lower()
+    assert "would you visit" in last                        # the open viewer question survives
+    assert "subscribe" not in last and "like and" not in last   # the platform CTA is stripped
 
 
 class _Sess:
@@ -192,6 +213,37 @@ def test_historical_image_prompt_has_no_negatives(monkeypatch, tmp_path):
     p = seen["p"].lower()
     assert " no " not in p and "letterbox" not in p and "without" not in p    # positive description only
     assert "full-bleed vertical" in p
+
+
+def test_wikimedia_skips_food_dishes_and_restaurants(monkeypatch):
+    data = {"query": {"pages": [
+        _cpage(1, "File:Temple gopuram.jpg"),
+        _cpage(2, "File:Masala dosa dish.jpg"),            # dish -> skip
+        _cpage(3, "File:Thali meal at a restaurant.jpg"),  # meal + restaurant + thali -> skip
+        _cpage(4, "File:People eating lunch.jpg"),          # eating + lunch -> skip
+        _cpage(5, "File:Street food stall.jpg"),            # food -> skip
+        _cpage(6, "File:Temple tank at dawn.jpg"),
+    ]}}
+    monkeypatch.setattr(M, "http", lambda: _Sess(data))
+    assert [i.id for i in M.wikimedia_images("temple")] == ["1", "6"]
+
+
+def test_opening_scene_is_the_strongest_landmark_photo_not_generic(monkeypatch, tmp_path):
+    v = Visuals(Settings(visual_sources=["wikimedia"]))
+    pool = [
+        _wimg("g1", "grass field and trees Gokarna"),               # generic -> never the opener
+        _wimg("t1", "Mahabaleshwar Temple Gokarna", w=1600, h=2000),  # the landmark, hi-res portrait
+        _wimg("b1", "Gokarna beach"),
+    ]
+    monkeypatch.setattr(M, "geosearch_images", lambda *a, **k: list(pool))
+    monkeypatch.setattr(v, "_wiki_search", lambda q: [])
+    monkeypatch.setattr(v, "_fetch", lambda item, d, i: (setattr(item, "path", d / f"s{i}.jpg") or item))
+    monkeypatch.setattr(M, "_low_quality_image", lambda p: False)
+    jobs = [("temple", "", False), ("beach", "", False), ("temple", "", False),
+            ("sea", "", False), ("temple", "", False)]
+    out = v.for_place_scenes(jobs, "Gokarna", "India", tmp_path / "m", min_images=3, lat=14.5, lon=74.3,
+                             title="Why does Gokarna's ancient Mahabaleshwar temple hide a secret?")
+    assert out[0].id == "t1"       # opener is the hi-res temple photo, not the grass/trees shot
 
 
 def test_ai_scene_style_is_cinematic_painterly_not_cartoon():
