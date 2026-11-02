@@ -254,6 +254,10 @@ _ANIMAL_PEOPLE_RE = re.compile(
     r"portraits?|selfies?|men|women|man|woman|child|children|boys?|girls?|people|crowd|crowds|"
     r"tourists?|pilgrims?|sadhus?|priests?|family|families|group photo)(?![a-z])", re.I)
 
+# Stereoscopic / 3D source images (side-by-side pairs, anaglyphs) render as a split or doubled frame with a
+# seam down the middle, not a flat photo — skip them by title/description keyword like we skip maps and signs.
+_STEREO_RE = re.compile(r"(?<![a-z0-9])(3[ _-]?d|stereo\w*|anaglyph\w*|sbs)(?![a-z])", re.I)
+
 
 def _wiki_item(pg: dict, rank: int, min_px: int, query: str = "") -> MediaItem | None:
     """Turn one Commons page (from search or geosearch) into a licensed MediaItem, or None when it is
@@ -275,7 +279,10 @@ def _wiki_item(pg: dict, rank: int, min_px: int, query: str = "") -> MediaItem |
     lic_url = (meta.get("LicenseUrl") or {}).get("value", "")
     obj = _TAG_RE.sub(" ", (meta.get("ObjectName") or {}).get("value", "") or "")
     cats = (meta.get("Categories") or {}).get("value", "")
-    if _SKIP_IMAGE_RE.search(f"{title} {obj} {cats}"):          # a map/diagram or butchery/carcass image
+    blob = f"{title} {obj} {cats}"
+    if _SKIP_IMAGE_RE.search(blob):                             # a map/diagram or butchery/carcass image
+        return None
+    if _STEREO_RE.search(blob):                                 # a stereoscopic/3D/anaglyph pair — renders split
         return None
     return MediaItem("wikimedia", str(pg.get("pageid") or title), "image", url=url, width=w, height=h,
                      credit=author, author=author, license=lic, license_url=lic_url, page_url=page_url,

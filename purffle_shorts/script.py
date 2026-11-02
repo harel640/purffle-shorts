@@ -518,7 +518,60 @@ def write_script(llm, subject: str, settings: Settings, *, source: str = "niche"
     script = normalize(data, subject, style, settings.language)
     log.info("Script (%s, %d words, %d scenes): %s", style, word_count(script.narration, settings.language),
              len(script.scenes), script.title)
+    if style in STORY_STYLES:
+        script = _ensure_story_length(llm, script, subject, settings)
     return script
+
+
+def _ensure_story_length(llm, script: Script, subject: str, settings: Settings) -> Script:
+    """A history/place Short must run at least ~45s. If the draft is shorter, ask the writer ONCE to expand
+    it into the 115-155 word range (same structure and facts, longer narration). If it is still short after
+    that, render anyway and log it — a slightly short Short beats no Short."""
+    lo, hi = HISTORY_RANGE
+    secs = word_count(script.narration, script.language) / WORDS_PER_SECOND
+    if secs >= lo:
+        return script
+    log.info("Script is ~%.0fs (%d words), under the %d-%ds target — asking the writer to expand it once",
+             secs, word_count(script.narration, script.language), lo, hi)
+    try:
+        expanded = _expand_story(llm, script, subject)
+    except Exception as e:  # noqa: BLE001 — a failed expansion must never sink the render
+        log.warning("Script expansion failed (%s); rendering the short draft", e)
+        return script
+    new_secs = word_count(expanded.narration, expanded.language) / WORDS_PER_SECOND
+    chosen, chosen_secs = (expanded, new_secs) if new_secs > secs else (script, secs)
+    if chosen_secs < lo:
+        log.warning("Script is still ~%.0fs after one expansion (target %d-%ds); rendering anyway",
+                    chosen_secs, lo, hi)
+    else:
+        log.info("Script expanded to ~%.0fs (%d words)", chosen_secs,
+                 word_count(chosen.narration, chosen.language))
+    return chosen
+
+
+def _expand_story(llm, script: Script, subject: str) -> Script:
+    """One targeted rewrite that only lengthens the narration, preserving title, hook, scene order, each
+    scene's search_query/image_prompt/historical flag, and every stated fact (no invented specifics)."""
+    lo, hi = HISTORY_RANGE
+    n = word_count(script.narration, script.language)
+    system = ("You are a top YouTube Shorts scriptwriter and editor. You reply with a single JSON object "
+              "and nothing else.")
+    user = (
+        f"This {script.style} Short script is too short (~{n} words, under {lo}s). Expand the NARRATION of "
+        f"each scene so the whole script is BETWEEN 115 and 155 words and runs {lo}-{hi}s, adding vivid, "
+        f"period-accurate sensory detail. Keep the SAME title, hook_text, the SAME number of scenes and their "
+        f"order, and each scene's search_query, image_prompt and historical flag unchanged. Do NOT invent "
+        f"names, dates, numbers or events that are not already in the draft; only enrich what is there. Keep "
+        f"the ending as ONE short, open question to the viewer. Reply with the same JSON shape.\n\n"
+        f"Draft:\n{json.dumps(script.to_dict(), ensure_ascii=False)}")
+    data = llm.complete_json(system, user, SCRIPT_SCHEMA, max_tokens=12000)
+    merged = script.to_dict()                       # keep tags, hashtags, description, category, topic
+    if data.get("scenes"):
+        merged["scenes"] = data["scenes"]           # take the expander's longer narration
+    for k in ("title", "hook_text"):
+        if data.get(k):
+            merged[k] = data[k]
+    return normalize(merged, subject, script.style, script.language)
 
 
 # --------------------------------------------------------------------------------------------------

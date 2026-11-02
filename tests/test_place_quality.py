@@ -104,6 +104,16 @@ def test_place_pool_skips_topic_when_too_few_place_accurate(monkeypatch):
         v._place_pool("Pulga", "India", None, None, 5)      # no coords, no title match -> empty -> skip
 
 
+def test_wiki_item_skips_stereoscopic_3d_images():
+    # A side-by-side 3D / stereoscopic / anaglyph Commons file renders as a split, doubled frame with a seam
+    # down the middle — reject it by title keyword like we already reject maps, signs and butchery images.
+    for title in ("File:Gokarna AdiGokarna DeityL BackWall 3D.jpg", "File:Temple stereoscopic pair.jpg",
+                  "File:Shrine anaglyph red cyan.jpg", "File:Mahabaleshwar gopura SBS.jpg"):
+        assert M._wiki_item(_cpage(1, title), 0, 800) is None, title
+    # A normal flat photo of the same landmark is still kept.
+    assert M._wiki_item(_cpage(2, "File:Mahabaleshwar Temple Gokarna.jpg"), 0, 800) is not None
+
+
 # ---------------------------------------------------------------- 4. architecture from article/region
 def test_architecture_derives_from_article_region_not_country_alone():
     himal = M._architecture_hint("Pulga", "India",

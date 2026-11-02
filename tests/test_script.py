@@ -136,6 +136,60 @@ def test_history_scriptwriting_gets_more_token_headroom():
     assert seen["mt"] == 4000
 
 
+def _story_data(narr, title="Why did the stone city rise and then fall silent?"):
+    return {"topic": "Hampi", "title": title, "hook_text": "Stone city",
+            "scenes": [{"narration": narr, "search_query": "Hampi ruins", "image_prompt": "Hampi ruins",
+                        "historical": False}],
+            "description": "d", "hashtags": [], "tags": ["hampi"], "category": "education"}
+
+
+class _SeqLLM:
+    """Returns a fixed sequence of complete_json responses and counts the calls."""
+    def __init__(self, *responses):
+        self.responses, self.calls = list(responses), 0
+
+    def complete_json(self, system, user, schema=None, max_tokens=4000, temperature=None):
+        r = self.responses[min(self.calls, len(self.responses) - 1)]
+        self.calls += 1
+        return r
+
+
+_LONG = " ".join(["The granite city rose beside the river and traders filled its bustling bazaars."] * 13)  # 169w
+_SHORT = "A stone city rose here and then fell silent."                                                      # ~10w
+
+
+def test_short_story_script_is_expanded_once():
+    from purffle_shorts.script import word_count, write_script
+    llm = _SeqLLM(_story_data(_SHORT), _story_data(_LONG))
+    s = write_script(llm, "Hampi", Settings(), style="history")
+    assert llm.calls == 2                                  # wrote once, then expanded exactly once
+    assert word_count(s.narration, "en") >= 117            # now long enough to run >= 45s
+
+
+def test_short_story_script_renders_anyway_if_still_short(caplog):
+    from purffle_shorts.script import word_count, write_script
+    llm = _SeqLLM(_story_data(_SHORT), _story_data(_SHORT))   # the expansion comes back short too
+    with caplog.at_level("WARNING", logger="purffle"):
+        s = write_script(llm, "Hampi", Settings(), style="history")
+    assert llm.calls == 2                                  # expanded once, not in a loop
+    assert word_count(s.narration, "en") < 117             # rendered anyway, still short
+    assert any("after one expansion" in r.getMessage() for r in caplog.records)
+
+
+def test_long_story_script_is_not_expanded():
+    from purffle_shorts.script import write_script
+    llm = _SeqLLM(_story_data(_LONG))
+    write_script(llm, "Hampi", Settings(), style="history")
+    assert llm.calls == 1                                  # already >= 45s; no second call
+
+
+def test_facts_style_is_never_expanded():
+    from purffle_shorts.script import write_script
+    llm = _SeqLLM(_story_data(_SHORT))                     # short, but facts has no 45s floor
+    write_script(llm, "octopus", Settings(), style="facts")
+    assert llm.calls == 1
+
+
 def test_normalize_keeps_historical_flag():
     data = {"scenes": [
         {"narration": "Why was this city abandoned?", "search_query": "Hampi", "image_prompt": "p",
