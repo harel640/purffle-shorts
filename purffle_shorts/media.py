@@ -15,7 +15,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote
 
+from . import safety
 from .config import Settings
+from .history import distance_km
 from .utils import PermanentError, download, http, raise_for_status, redact, with_retries
 
 log = logging.getLogger("purffle")
@@ -284,10 +286,52 @@ def _wiki_item(pg: dict, rank: int, min_px: int, query: str = "") -> MediaItem |
         return None
     if _STEREO_RE.search(blob):                                 # a stereoscopic/3D/anaglyph pair — renders split
         return None
+    extra: dict = {"wiki_title": _wiki_title(title)}
+    lat, lon = _image_coords(pg, meta)
+    if lat is not None:
+        extra.update(lat=lat, lon=lon)
     return MediaItem("wikimedia", str(pg.get("pageid") or title), "image", url=url, width=w, height=h,
                      credit=author, author=author, license=lic, license_url=lic_url, page_url=page_url,
-                     query=query, rank=rank, text=f"{title} {obj} {cats}".strip(),
-                     extra={"wiki_title": _wiki_title(title)})
+                     query=query, rank=rank, text=f"{title} {obj} {cats}".strip(), extra=extra)
+
+
+def _image_coords(pg: dict, meta: dict) -> tuple[float | None, float | None]:
+    """Where a Commons photo was taken: its page coordinates, else the GPS fields of its metadata."""
+    co = (pg.get("coordinates") or [{}])[0]
+    try:
+        if "lat" in co and "lon" in co:
+            return float(co["lat"]), float(co["lon"])
+        la, lo = (meta.get("GPSLatitude") or {}).get("value"), (meta.get("GPSLongitude") or {}).get("value")
+        if la not in (None, "") and lo not in (None, ""):
+            return float(la), float(lo)
+    except (TypeError, ValueError):
+        pass
+    return None, None
+
+
+FOREIGN_KM = 50          # a name-matched photo taken farther than this from the place shows somewhere else
+_COUNTRY_WORDS = ("india", "nepal", "bhutan", "china", "pakistan", "bangladesh", "sri lanka", "maldives", "myanmar",
+                  "burma", "thailand", "laos", "cambodia", "vietnam", "malaysia", "singapore", "indonesia",
+                  "philippines", "brunei", "timor-leste", "east timor", "japan", "south korea", "north korea",
+                  "korea", "taiwan", "mongolia", "kazakhstan", "kyrgyzstan", "tajikistan", "turkmenistan",
+                  "uzbekistan", "afghanistan", "iran")
+
+
+def _foreign_photo(item: MediaItem, lat: float | None, lon: float | None, country: str) -> str:
+    """Why a photo whose title names the place actually shows another place, or "". By its coordinates when
+    it has them (taken more than FOREIGN_KM away: "Shey Palace", Ladakh is not "Shey Gompa", Nepal); else by
+    its title/categories naming a different country and not the place's own."""
+    ilat, ilon = item.extra.get("lat"), item.extra.get("lon")
+    if lat is not None and lon is not None and ilat is not None and ilon is not None:
+        d = distance_km(lat, lon, ilat, ilon)
+        return f"taken {d:.0f} km from the place" if d > FOREIGN_KM else ""
+    if not country:
+        return ""
+    own = safety.country_names(country)
+    text = (item.text or "").lower()
+    named = [c for c in _COUNTRY_WORDS if re.search(rf"(?<![a-z]){re.escape(c)}(?![a-z])", text)]
+    mine = [c for c in named if any(c in o or o in c for o in own)]
+    return f"its description places it in {named[0].title()}, not {country}" if named and not mine else ""
 
 
 def _commons_query(params: dict, what: str) -> dict:
@@ -312,7 +356,8 @@ def wikimedia_images(query: str, limit: int = 20, min_px: int = 800) -> list[Med
     data = _commons_query({
         "action": "query", "format": "json", "formatversion": 2,
         "generator": "search", "gsrsearch": f"filetype:bitmap {query}", "gsrnamespace": 6,
-        "gsrlimit": limit, "prop": "imageinfo", "iiprop": "url|size|extmetadata", "iiurlwidth": 1600},
+        "gsrlimit": limit, "prop": "imageinfo|coordinates", "iiprop": "url|size|extmetadata", "iiurlwidth": 1600,
+        "coprimary": "all", "colimit": "max"},
         "Wikimedia Commons search")
     pages = (data.get("query") or {}).get("pages") or []
     items: list[MediaItem] = []
@@ -331,7 +376,8 @@ def geosearch_images(lat: float, lon: float, radius_m: int = 5000, limit: int = 
         "action": "query", "format": "json", "formatversion": 2,
         "generator": "geosearch", "ggscoord": f"{lat}|{lon}", "ggsradius": int(max(10, min(10000, radius_m))),
         "ggsnamespace": 6, "ggslimit": limit,
-        "prop": "imageinfo", "iiprop": "url|size|extmetadata", "iiurlwidth": 1600}, "Wikimedia geosearch")
+        "prop": "imageinfo|coordinates", "iiprop": "url|size|extmetadata", "iiurlwidth": 1600,
+        "coprimary": "all", "colimit": "max"}, "Wikimedia geosearch")
     pages = (data.get("query") or {}).get("pages") or []
     items: list[MediaItem] = []
     for rank, pg in enumerate(sorted(pages, key=lambda p: p.get("index", 999))):
@@ -418,10 +464,9 @@ def cloudflare_image(prompt: str, dest: Path, account_id: str, token: str, steps
     return with_retries(_do, attempts=2, label="Cloudflare image")
 
 
-# Period discipline for every historical AI illustration. Positive detail only — FLUX draws whatever is named,
-# so we describe the period's own clothing and objects rather than listing modern ones to exclude.
-_HISTORICAL_PERIOD = ("period-accurate historical scene: people in handwoven robes and simple sandals, carrying "
-                      "cloth bundles and clay pots, lit by oil lamps and daylight")
+# Period discipline for every historical AI illustration. Positive detail only — FLUX draws whatever is named.
+# The clothing and architecture come from the place's own article (place_look), never a generic default.
+_HISTORICAL_PERIOD = "period-accurate historical scene, lit by oil lamps and daylight"
 
 # Scenes that must NOT be AI-generated: a deity, god or religious figure. We illustrate these with a real photo
 # of the temple/place instead and let the narration tell the myth as "legend says".
@@ -431,65 +476,113 @@ _DEITY_RE = re.compile(
     r"buddha|bodhisattva|avalokiteshvara|guanyin|allah|prophet|jesus|christ|saint|angel|demon|rakshasa|"
     r"ravana|asura|naga)(?![a-z])", re.I)
 
-# Architecture cue per place, so a past scene is drawn in the style of THAT place rather than one hardcoded
-# look. Keyed by country (or a distinctive place keyword); extend by adding an entry. FLUX draws whatever a
-# prompt names, so every cue describes the real style POSITIVELY (its roofs, towers and materials) and never
-# says "no domes" — the specific roof it DOES name is what keeps the wrong roof out. Placed first in the prompt.
-_ARCHITECTURE = {
-    "india": "South Indian stone temple architecture with tall tiered gopuram gateway towers and flat-roofed "
-             "pillared mandapa halls of carved granite",
-    "myanmar": "Burmese temple architecture with gilded bell-shaped stupas and tapering zedi spires",
-    "burma": "Burmese temple architecture with gilded bell-shaped stupas and tapering zedi spires",
-    "thailand": "Thai temple architecture with pointed chedi stupas and steep tiered gilded roofs",
-    "cambodia": "Khmer temple architecture with corn-cob sandstone prang towers and laterite galleries (Angkor style)",
-    "indonesia": "Indonesian candi architecture with stepped volcanic-stone terraces (Borobudur/Prambanan style)",
-    "sri lanka": "Sinhalese architecture with white hemispherical dagoba stupas and carved stone pillars",
-    "nepal": "Newar pagoda architecture with tiered sloping wooden roofs and carved timber struts",
-    "japan": "Japanese architecture with wooden temples and multi-tiered pagodas under sweeping curved tiled roofs",
-    "china": "Chinese architecture with timber halls under upturned glazed-tile eaves",
-    "vietnam": "Vietnamese architecture with sweeping tiled curved roofs and tiered Cham brick towers",
-    "laos": "Lao temple architecture with pointed that stupas and low tiered roofs",
-    "bhutan": "Bhutanese dzong architecture, fortress-monasteries with sloping whitewashed rammed-earth walls and timber galleries",
-}
-
-
-# Architecture cues keyed by distinctive words in the place's own Wikipedia text (checked BEFORE the country
-# fallback), so a Himalayan village is drawn as stacked timber houses, not a South Indian gopuram. Positive
-# descriptions only (the named roof/material is what steers FLUX, not a "no ..." negative it would draw anyway).
-_ARCH_BY_KEYWORD = [
-    (re.compile(r"kath[\s-]?kuni|cator and cribbage|himachal|kinnaur|spiti|kullu|parvati valley|himalay", re.I),
-     "Himalayan kath-kuni architecture: stacked timber-and-stone houses with carved wooden balconies and "
-     "pitched slate roofs, pine forests and snow peaks behind"),
-    (re.compile(r"\bstepwell|step well|\bbaori\b|\bbaoli\b|\bvav\b", re.I),
-     "Indian stepwell architecture: symmetrical carved stone steps descending into an underground water tank"),
-    (re.compile(r"\bhaveli", re.I),
-     "Rajasthani haveli architecture: carved sandstone townhouses with projecting jharokha balcony windows"),
+# How a past scene of a place should LOOK — its architecture and its people's clothing — keyed by architectural
+# and cultural terms in the place's own Wikipedia text (never by country: "India" alone says nothing about a
+# Himalayan monastery vs a Hoysala temple). First match wins, so the more specific styles come first. Positive
+# descriptions only: FLUX draws what is named, so the named roof/material is what keeps the wrong one out.
+_LOOK_BY_KEYWORD: list[tuple[re.Pattern, str, str]] = [
+    (re.compile(r"tibetan|gompa|gonpa|lamasery|vajrayana|nyingma|kagyu|gelug|sakya|drukpa|\bbon\b|dolpo|"
+                r"ladakh|zanskar|upper mustang|spiti", re.I),
+     "Tibetan Buddhist monastery architecture: whitewashed stone and mud-brick walls with dark red upper bands, "
+     "flat roofs edged with prayer flags, small trapezoid windows framed in black, on a bare high-altitude slope",
+     "monks in maroon robes with saffron sashes; villagers in thick wool chuba robes and felt boots"),
+    (re.compile(r"hoysala|belur|halebid|halebeedu|somanathapura", re.I),
+     "Hoysala temple architecture: star-shaped platforms and walls of grey-green soapstone, dense carved friezes "
+     "of elephants, dancers and scrollwork, lathe-turned pillars",
+     "people in draped cotton dhotis and saris with gold jewellery, 12th-century South Indian dress"),
     (re.compile(r"\bdzong\b", re.I),
-     "Bhutanese dzong architecture: fortress-monasteries with sloping whitewashed walls and timber galleries"),
-    (re.compile(r"stilt house|longhouse|bamboo house|tribal village|thatched", re.I),
-     "timber-and-bamboo stilt houses raised on posts with pitched thatched roofs"),
-    (re.compile(r"\bhanok\b", re.I),
-     "Korean hanok architecture: timber houses with gently curved tiled roofs"),
-    (re.compile(r"rock[\s-]?cut|cave temple|monolith|caves?\b", re.I),
-     "Indian rock-cut cave architecture: pillared halls and shrines carved into living stone cliffs"),
-    (re.compile(r"\bminaret|\bmosque|\bmadrasa|\bcaravanserai|silk road", re.I),
-     "Central Asian Islamic architecture: tiled pointed iwans, slender minarets and glazed blue tilework"),
+     "Bhutanese dzong architecture: fortress-monasteries with sloping whitewashed walls, a red band under the "
+     "roof, carved timber galleries and tiered shingle roofs",
+     "men in knee-length gho robes and women in ankle-length kira, monks in maroon robes"),
+    (re.compile(r"kath[\s-]?kuni|kinnaur|\bkullu\b|himachal|parvati valley", re.I),
+     "Himalayan kath-kuni architecture: stacked timber-and-stone houses with carved wooden balconies and pitched "
+     "slate roofs, pine forests and snow peaks behind",
+     "villagers in hand-woven wool pattu shawls and round Himachali caps"),
+    (re.compile(r"\bnewar|malla dynasty|kathmandu valley|durbar square|pagoda-style", re.I),
+     "Newar architecture: brick temples with tiered sloping timber roofs on carved wooden struts, latticed windows",
+     "men in daura-suruwal tunics and topi caps, women in black haku patasi saris with red borders"),
+    (re.compile(r"gassho|minka|thatched farmhouse", re.I),
+     "Japanese gassho-zukuri farmhouses: steep thatched roofs like praying hands over timber frames, rice paddies",
+     "farmers in indigo cotton work kimono and straw hats"),
+    (re.compile(r"\bshinto|\bshrine\b.*\bjapan|\btorii|\bedo period|\bsamurai|\bjapanese temple", re.I),
+     "Japanese architecture: wooden temples and pagodas under sweeping curved tiled roofs",
+     "people in kimono and wooden geta sandals"),
+    (re.compile(r"\bhanok\b|joseon", re.I),
+     "Korean hanok architecture: timber houses with gently curved tiled roofs and paper-screen doors",
+     "people in white hanbok robes, men in black gat hats"),
+    (re.compile(r"huizhou|hui-style|\bhui\b architecture|horse-head wall", re.I),
+     "Huizhou architecture: whitewashed walls with stepped horse-head gables and black-tiled roofs by a stream",
+     "villagers in plain cotton hanfu jackets and conical bamboo hats"),
+    (re.compile(r"ming dynasty|qing dynasty|song dynasty|tang dynasty|siheyuan|courtyard house", re.I),
+     "Chinese architecture: timber halls under upturned glazed-tile eaves around stone courtyards",
+     "people in layered hanfu robes of cotton and silk"),
+    (re.compile(r"\bkhmer\b|angkor|\bprasat\b|\bprang\b", re.I),
+     "Khmer temple architecture: corn-cob sandstone prang towers, carved lintels and laterite galleries",
+     "people in sampot wraps of cotton and silk, palm-leaf hats"),
+    (re.compile(r"gopuram|gopura|dravidian|vijayanagara|chola|pallava|pandya|\bmandapa", re.I),
+     "South Indian stone temple architecture: tall tiered gopuram gateway towers and pillared mandapa halls of "
+     "carved granite",
+     "people in draped cotton dhotis and saris with flowers in the hair"),
+    (re.compile(r"\bdagoba|anuradhapura|polonnaruwa|sinhal", re.I),
+     "Sinhalese architecture: white hemispherical dagoba stupas and carved stone pillars and moonstones",
+     "people in white cotton sarongs and wrapped cloths"),
+    (re.compile(r"\bzedi\b|\bpaya\b|pagan kingdom|\bbagan\b|mrauk|arakan", re.I),
+     "Burmese temple architecture: brick and stone temples with bell-shaped stupas and tapering spires",
+     "people in longyi wraps and gaungbaung headcloths"),
+    (re.compile(r"\bstepwell|step well|\bbaori\b|\bbaoli\b|\bvav\b", re.I),
+     "Indian stepwell architecture: symmetrical carved stone steps descending into an underground water tank",
+     "women in bright cotton ghagra skirts and odhni veils carrying brass water pots"),
+    (re.compile(r"\bhaveli", re.I),
+     "Rajasthani haveli architecture: carved sandstone townhouses with projecting jharokha balcony windows",
+     "people in bright turbans and ghagra-choli"),
+    (re.compile(r"\bminaret|\bmosque|\bmadrasa|\bcaravanserai|silk road|timurid", re.I),
+     "Central Asian Islamic architecture: tiled pointed iwans, slender minarets and glazed blue tilework",
+     "merchants in long striped chapan robes and embroidered skullcaps"),
+    (re.compile(r"stilt house|longhouse|bamboo house|thatched", re.I),
+     "timber-and-bamboo stilt houses raised on posts with pitched thatched roofs",
+     "villagers in hand-woven cotton wraps"),
+    (re.compile(r"rock[\s-]?cut|cave temple", re.I),
+     "rock-cut cave architecture: pillared halls and shrines carved into living stone cliffs",
+     "monks and pilgrims in simple draped cotton robes"),
 ]
+_LOOK_LEAD_CHARS = 1500          # rules read the article's opening: what the place IS, not a passing mention
+LOOK_SCHEMA = {"type": "object", "additionalProperties": False,
+               "properties": {"architecture": {"type": "string"}, "clothing": {"type": "string"}},
+               "required": ["architecture", "clothing"]}
 
 
-def _architecture_hint(place: str, country: str, article: str = "") -> str:
-    """A place-appropriate architecture cue for AI illustrations, so a Khmer ruin isn't drawn like a Greek
-    temple and a Himalayan village isn't drawn with gopurams. Derived from the Wikipedia text and region
-    first, then the country; a neutral, non-anachronistic cue otherwise."""
-    region = f"{place} {country} {article}".lower()
-    for rx, hint in _ARCH_BY_KEYWORD:
-        if rx.search(region):
-            return hint
-    blob = f"{place} {country}".lower()
-    for key, hint in _ARCHITECTURE.items():
-        if re.search(rf"(?<![a-z]){re.escape(key)}(?![a-z])", blob):
-            return hint
-    return "traditional stone and timber architecture authentic to this place and era"
+def look_from_text(place: str, article: str) -> dict:
+    """{architecture, clothing} from the curated rules, matched against the place's name and the opening of
+    its own article — or {} when nothing in the text identifies its style (there is NO country default)."""
+    blob = f"{place}\n{(article or '')[:_LOOK_LEAD_CHARS]}"
+    for rx, arch, clothing in _LOOK_BY_KEYWORD:
+        if rx.search(blob):
+            return {"architecture": arch, "clothing": clothing}
+    return {}
+
+
+def look_from_llm(llm, place: str, country: str, article: str) -> dict:
+    """{architecture, clothing} an LLM reads out of the article itself, or {} (no basis in the text, or no
+    LLM). Positive concrete details only, as FLUX draws whatever a prompt names."""
+    if llm is None or not (article or "").strip():
+        return {}
+    system = "You turn a Wikipedia article into precise visual notes for a historical illustrator. Strict JSON."
+    user = (f"Place: {place}{', ' + country if country else ''}\n"
+            "From the article below ONLY, describe for an illustrator (1) `architecture`: this place's buildings "
+            "in the period its history covers - materials, walls, roofs, colours, distinctive forms; (2) "
+            "`clothing`: what its people wore then. Concrete positive details only (say what IS there, never "
+            "'no ...'). Use what the article states or directly implies (e.g. 'a Tibetan Buddhist monastery' "
+            "implies whitewashed walls with red bands, flat roofs, monks in maroon robes). Never use a country's "
+            "typical style unless the article itself points to it. If the article gives no basis, return empty "
+            "strings. At most 40 words each.\n\nArticle:\n" + article[:3500])
+    try:
+        d = llm.complete_json(system, user, schema=LOOK_SCHEMA, max_tokens=600, temperature=0.0)
+    except Exception as e:
+        log.warning("Reading the place's look from its article failed (%s)", redact(e))
+        return {}
+    arch = str((d or {}).get("architecture", "")).strip() if isinstance(d, dict) else ""
+    clothing = str((d or {}).get("clothing", "")).strip() if isinstance(d, dict) else ""
+    return {"architecture": arch, "clothing": clothing} if arch else {}
 
 
 # ------------------------------------------------------------------------------------------ selection
@@ -629,6 +722,7 @@ class Visuals:
         self.budget = budget                          # Cloudflare neuron budget for AI image gen (may be None)
         self._vision_cache: dict[tuple[str, str], bool | None] = {}
         self._vision_unavailable = False              # set when the check is configured but no model answered
+        self._look_cache: dict = {}                   # (place, country, article) -> {architecture, clothing}
         self.used = set(used_keys or ())
         self.lock = threading.Lock()
         self._search_cache: dict[tuple[str, str], list[MediaItem]] = {}
@@ -763,6 +857,17 @@ class Visuals:
         self._wiki_cache[q.lower()] = items
         return items
 
+    def place_look(self, place: str, country: str, article: str) -> dict:
+        """How this place's past should look ({architecture, clothing}), from its own Wikipedia article: the
+        curated style rules first, then an LLM reading the article; {} if the text gives no basis. Cached."""
+        key = (place.lower(), country.lower(), hash(article or ""))
+        if key not in self._look_cache:
+            look = look_from_text(place, article) or look_from_llm(self.llm, place, country, article)
+            if look:
+                log.info("Look from the article: %s | %s", look["architecture"][:80], look["clothing"][:60])
+            self._look_cache[key] = look
+        return self._look_cache[key]
+
     def verify_subject(self, item: MediaItem, subject: str) -> bool | None:
         """Ask the vision model whether the downloaded image actually shows ``subject`` (Commons titles lie).
         Cached per (image, subject). Only an explicit "yes" (True) is a pass; a "no" (False) rejects the image;
@@ -870,14 +975,17 @@ class Visuals:
             return item
         return None
 
-    def _historical_image(self, prompt: str, dest_dir: Path, idx: int, arch: str = "") -> MediaItem | None:
+    def _historical_image(self, prompt: str, dest_dir: Path, idx: int, arch: str = "",
+                          clothing: str = "") -> MediaItem | None:
         """A past scene the camera can't reach: generate one AI illustration in the configured consistent
-        cinematic style, period-accurate and in the architecture of ``arch`` (the place's own style). Free
-        providers only by default (pollinations/cloudflare = FLUX, Apache-2.0); paid providers (openai/gemini)
-        must be chosen explicitly. Returns None to fall back to a real photo."""
+        cinematic style, period-accurate, in the architecture ``arch`` and clothing ``clothing`` read from the
+        place's own article. Without an architecture there is nothing place-true to draw, so None (a real
+        photo instead) - never a generic or country-default look. Free providers only by default
+        (pollinations/cloudflare = FLUX, Apache-2.0); paid providers (openai/gemini) must be chosen explicitly.
+        Returns None to fall back to a real photo."""
         s = self.s
         source = (getattr(s, "ai_scene_source", "") or "").strip().lower()
-        if source in ("", "none", "off"):
+        if source in ("", "none", "off") or not (arch or "").strip():
             return None
         # Never generate images of a deity or religious figure: fall back to a real photo of the temple/place
         # and let the narration tell the myth as "legend says".
@@ -885,10 +993,10 @@ class Visuals:
             log.info("Scene %d: a deity/religious figure — using a real photo, not an AI image", idx + 1)
             return None
         style = s.ai_scene_style or s.visual_style
-        arch = arch or "traditional stone and timber architecture authentic to the place and era"
-        # Architecture leads (it anchors the look). Positive description only — FLUX draws whatever is named,
-        # so we ask for a full-bleed vertical frame rather than listing "no borders / no text" negatives.
-        full = (f"{arch}. {prompt}. {style}. {_HISTORICAL_PERIOD}. "
+        # Architecture leads (it anchors the look), then the people's clothing. Positive description only — FLUX
+        # draws whatever is named, so we ask for a full-bleed vertical frame rather than listing negatives.
+        people = f"{clothing.strip().rstrip('.')}. " if (clothing or "").strip() else ""
+        full = (f"{arch.strip().rstrip('.')}. {people}{prompt}. {style}. {_HISTORICAL_PERIOD}. "
                 "A full-bleed vertical 9:16 cinematic composition filling the entire frame edge to edge.")
         dest = dest_dir / f"scene{idx:02d}_ai.jpg"
         try:
@@ -957,6 +1065,10 @@ class Visuals:
             for it in self._wiki_search(q):
                 if it.key not in seen and _names_place(it, place_tokens):
                     seen.add(it.key)
+                    why = _foreign_photo(it, lat, lon, country)
+                    if why:                                    # same name, another place (Shey Palace != Shey Gompa)
+                        log.info("Wikimedia: skipped %r (%s)", it.extra.get("wiki_title") or it.id, why)
+                        continue
                     pool.append(it)
         log.info("Wikimedia: %d place-accurate image(s) for %s (%d within 5 km%s)", len(pool), pc or place,
                  near, "" if lat is not None else "; no coordinates, titles only")
@@ -1028,7 +1140,12 @@ class Visuals:
         # The subject the opener and the last scene must actually show (checked in pixels, not the title).
         landmark_subject = " ".join(
             dict.fromkeys(list(landmark_terms)[:4] + [w for w in [place] if w])).strip() or place
-        arch = _architecture_hint(place, country, article)     # draw the past in THIS place's architecture/region
+        # Draw the past in THIS place's architecture and clothing, read from its own article (no country default;
+        # with nothing to go on, its past scenes become real photos).
+        look = self.place_look(place, country, article) if any(h for _q, _p, h in jobs) else {}
+        arch, clothing = look.get("architecture", ""), look.get("clothing", "")
+        if any(h for _q, _p, h in jobs) and not arch:
+            log.info("No architecture described in the article for %s; past scenes use real photos", place)
         results: list[MediaItem] = []
         chosen: set[str] = set()                               # distinctive subjects already shown this video
         prev_key, consec = None, 0
@@ -1036,7 +1153,8 @@ class Visuals:
         for i, (q, prompt, historical) in enumerate(jobs):
             is_landmark = i == 0 or i == last                  # opener & closer must show the main landmark
             subject = landmark_subject if is_landmark else (q or place)
-            item = self._historical_image(prompt or q, dest_dir, i, arch) if historical else None
+            item = (self._historical_image(prompt or q, dest_dir, i, arch=arch, clothing=clothing)
+                    if historical and arch else None)
             if item is None and i == 0:                        # opener: the strongest photo of the title landmark
                 item = self._open_landmark_image(pool, landmark_terms, place, country, dest_dir, landmark_subject)
             if item is None:                                   # place-today scene, or AI unavailable/failed

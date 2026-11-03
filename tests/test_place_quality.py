@@ -176,12 +176,62 @@ def test_wiki_item_skips_stereoscopic_3d_images():
 
 
 # ---------------------------------------------------------------- 4. architecture from article/region
-def test_architecture_derives_from_article_region_not_country_alone():
-    himal = M._architecture_hint("Pulga", "India",
-                                 "Pulga is a village in Himachal Pradesh built in the kath-kuni style.")
-    assert "kath-kuni" in himal.lower() and "timber" in himal.lower() and " no " not in himal.lower()
-    # Without the article, the country fallback would wrongly draw a Himalayan village as a South Indian temple:
-    assert "gopuram" in M._architecture_hint("Pulga", "India").lower()
+def test_architecture_derives_from_article_text_never_the_country():
+    himal = M.look_from_text("Pulga", "Pulga is a village in Himachal Pradesh built in the kath-kuni style.")
+    assert "kath-kuni" in himal["architecture"].lower() and " no " not in himal["architecture"].lower()
+    assert "pattu" in himal["clothing"].lower()
+    # The country alone says nothing about the style: no default (it once drew a Himalayan village with gopurams).
+    assert M.look_from_text("Pulga", "") == {}
+    assert M.look_from_text("Pulga", "Pulga is a village in India.") == {}
+
+
+@pytest.mark.parametrize("place, article, arch_words, clothing_words", [
+    ("Shey Gompa", "The Shey Gompa is a Tibetan Buddhist monastery in the Dolpo region of Nepal.",
+     ["whitewashed", "red", "flat roofs"], ["maroon robes"]),
+    ("Chennakeshava Temple", "The Chennakeshava Temple at Belur is a 12th-century Hoysala temple in Karnataka.",
+     ["star-shaped", "soapstone"], ["dhoti"]),
+    ("Shirakawa-go", "Shirakawa-go is known for its gassho-zukuri farmhouses.", ["thatched"], ["kimono"]),
+])
+def test_look_matches_the_articles_own_style(place, article, arch_words, clothing_words):
+    look = M.look_from_text(place, article)
+    assert all(w in look["architecture"].lower() for w in arch_words), look
+    assert all(w in look["clothing"].lower() for w in clothing_words), look
+
+
+def test_look_uses_the_llm_reading_the_article_when_no_rule_matches():
+    article = "Old Kandahar Port is a fishing harbour ringed by coral-stone warehouses with teak shutters."
+
+    class LLM:
+        calls = 0
+
+        def complete_json(self, system, user, *, schema=None, **k):
+            LLM.calls += 1
+            assert schema is M.LOOK_SCHEMA and article in user           # it reads THIS place's article
+            return {"architecture": "coral-stone warehouses with teak shutters", "clothing": "sailors in lungis"}
+
+    v = Visuals(Settings(), llm=LLM())
+    look = v.place_look("Old Port", "Maldives", article)
+    assert "coral-stone" in look["architecture"] and look["clothing"] == "sailors in lungis"
+    v.place_look("Old Port", "Maldives", article)
+    assert LLM.calls == 1                                                # cached per place + article
+    assert Visuals(Settings()).place_look("Somewhere", "India", "A village in India.") == {}   # no basis, no LLM
+
+
+def test_no_look_means_no_ai_image_and_the_prompt_carries_the_clothing(monkeypatch, tmp_path):
+    from PIL import Image
+    seen = {}
+
+    def fake_poll(prompt, dest, width, height, key=""):
+        seen["p"] = prompt
+        Image.new("RGB", (1024, 1024), (40, 40, 40)).save(dest)
+        return dest
+
+    monkeypatch.setattr(M, "pollinations_image", fake_poll)
+    v = Visuals(Settings(ai_scene_source="pollinations"))
+    assert v._historical_image("monks at prayer", tmp_path, 0, arch="") is None     # nothing place-true to draw
+    look = M.look_from_text("Shey Gompa", "a Tibetan Buddhist monastery in Dolpo")
+    v._historical_image("monks at prayer", tmp_path, 1, arch=look["architecture"], clothing=look["clothing"])
+    assert seen["p"].startswith("Tibetan Buddhist monastery") and "maroon robes" in seen["p"]
 
 
 # ---------------------------------------------------------------- 5. no image for >2 scenes in a row

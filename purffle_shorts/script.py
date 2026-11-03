@@ -265,7 +265,9 @@ def _format_rules(style: str) -> str:
 
 
 def build_prompt(subject: str, style: str, settings: Settings, avoid: list[str], context: str = "",
-                 insights: str = "", keywords: str = "") -> tuple[str, str]:
+                 insights: str = "", keywords: str = "", place_title: bool = False) -> tuple[str, str]:
+    """``place_title``: the video is about one real place whose name is put in front of the title and whose
+    description is a one-line summary (see pipeline.place_title / place_description)."""
     lang = LANGUAGES.get(settings.language, settings.language)
     words, n_scenes = scene_plan(style, settings.target_seconds)
     eff = effective_seconds(style, settings.target_seconds)
@@ -305,6 +307,13 @@ def build_prompt(subject: str, style: str, settings: Settings, avoid: list[str],
             "\"octopus underwater\", \"old library books\"). No abstract words.\n"
             "- image_prompt: one vivid English sentence for an AI image of that scene, no text or letters in the image.\n"
             "- historical: always false for this format.\n")
+    title_rule = ("- title: the HOOK only, max 40 characters, curiosity-driven but honest — do NOT include the place "
+                  "name (it is put in front: \"HAMPI: The Richest City That Vanished\"). No hashtags, no quotes."
+                  if place_title else
+                  "- title: max 60 characters, curiosity-driven but honest, no hashtags, no quotes.")
+    description_rule = ("- description: ONE sentence summarising the video that names the place and its country. "
+                        "No hashtags." if place_title else
+                        "- description: 2-3 sentences plus one question that invites comments. No hashtags.")
     system = (
         "You are a top YouTube Shorts scriptwriter and editor. You write fast, factual, highly "
         "re-watchable vertical videos. You reply with a single JSON object and nothing else."
@@ -334,9 +343,9 @@ Language: {lang} for narration, title, hook_text, cast and description. search_q
 {ending}- Narration is spoken by a voice: no emojis, hashtags, labels, brackets or stage directions.
 {visual_rules}- emphasis: the 1-2 words of that scene's narration that carry it (a number, a name, the surprising word), copied exactly as written there. They are highlighted on screen; use [] when nothing stands out.
 - emoji: ONE emoji that fits that scene, popped up on screen above the captions (e.g. 🐙 for an octopus, 🤯 for a twist), or "" when none fits. Never put emoji in the narration.
-- title: max 60 characters, curiosity-driven but honest, no hashtags, no quotes.
+{title_rule}
 - hook_text: max 6 words shown on screen during the first seconds.
-- description: 2-3 sentences plus one question that invites comments. No hashtags.
+{description_rule}
 - hashtags: 3-5 relevant hashtags. tags: 8-15 search keywords.
 - category: one of {", ".join(CATEGORIES)}.
 
@@ -507,11 +516,11 @@ def word_count(text: str, language: str = "en") -> int:
 
 def write_script(llm, subject: str, settings: Settings, *, source: str = "niche",
                  avoid: list[str] | None = None, context: str = "", style: str | None = None,
-                 insights: str = "", keywords: str = "") -> Script:
+                 insights: str = "", keywords: str = "", place_title: bool = False) -> Script:
     style = style if style in STYLES else pick_style(settings, source)
     if llm is None:
         return offline_script(subject, settings, style)
-    system, user = build_prompt(subject, style, settings, avoid or [], context, insights, keywords)
+    system, user = build_prompt(subject, style, settings, avoid or [], context, insights, keywords, place_title)
     # The story format writes a longer script from a longer (grounded) prompt; reasoning models need extra
     # completion-token headroom or they hit the limit before closing the JSON.
     data = llm.complete_json(system, user, SCRIPT_SCHEMA, max_tokens=12000 if style in STORY_STYLES else 4000)
