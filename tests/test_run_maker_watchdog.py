@@ -28,6 +28,8 @@ def test_watchdog_present_and_copies_in_sync():
         assert "TIMEOUT" in text                             # recorded in the daily summary
         assert "retrying once" in text                       # and retried once
         assert "SKIPPED vision unavailable" in text          # fail-closed vision skip surfaced in the summary
+        assert "$null = $p.Handle" in text                   # else ExitCode reads empty and every run "fails"
+        assert "if ($r.Uploaded)" in text                    # a run that uploaded is never retried
     if len(copies) == 2:
         digests = {hashlib.sha256(p.read_bytes()).hexdigest() for p in copies}
         assert len(digests) == 1, "the two run-maker.ps1 copies have drifted apart"
