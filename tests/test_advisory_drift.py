@@ -71,7 +71,10 @@ def test_kyrgyzstan_matches_the_feeds_kyrgyz_republic(monkeypatch):
                            PLAIN) + "</rss>"
     assert [e.country for e in safety.advisory_entries(feed)] == ["kyrgyz republic"]
     monkeypatch.setattr(safety, "advisories", lambda: {"the kyrgyz republic": 1})   # advisories() keeps "the"
-    assert not safety.verdict_for(safety.country_names("Kyrgyzstan"), "Issyk-Kul").unsafe
+    assert safety.verdict_for(safety.country_names("Kyrgyzstan"), "Issyk-Kul").unsafe   # uncurated: blocked
+    monkeypatch.setattr(safety, "UNCURATED_COUNTRIES", {})
+    v = safety.verdict_for(safety.country_names("Kyrgyzstan"), "Issyk-Kul")
+    assert not v.unsafe and v.level == 1                          # the alias finds its Level 1 advisory
 
 
 def test_verdict_for_matches_check_without_an_llm(monkeypatch):

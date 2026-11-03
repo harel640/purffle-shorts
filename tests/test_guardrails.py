@@ -80,7 +80,7 @@ def test_uncurated_country_is_blocked_whole_until_its_areas_are_listed(monkeypat
     monkeypatch.setattr(safety, "advisories", lambda: FEED)
     v = safety.check("Chiang Mai, Thailand", FakeLLM({"country": "Thailand", "aliases": [], "region": "Chiang Mai"}))
     assert v.unsafe and "not curated" in v.reason
-    for c in ("Thailand", "Indonesia", "Laos", "Cambodia", "Nepal", "Bangladesh", "Tajikistan"):
+    for c in ("Thailand", "Indonesia", "Laos", "Cambodia", "Nepal", "Bangladesh", "Tajikistan", "Kyrgyzstan"):
         assert safety.verdict_for(safety.country_names(c), "anywhere").unsafe, c
     monkeypatch.setattr(safety, "UNCURATED_COUNTRIES", {})          # once curated, the normal rules apply
     assert not safety.check("Chiang Mai, Thailand",

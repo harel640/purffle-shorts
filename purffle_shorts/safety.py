@@ -77,6 +77,10 @@ UNCURATED_COUNTRIES: dict[str, str] = {
                   "destination.bgd.html (issued 2026-07-30)",
     "tajikistan": "https://travel.state.gov/content/tsg_aem/us/en/home/international-travel/travel-advisories/"
                   "destination.tjk.html (issued 2026-09-04)",
+    # Same check on its page; listed once the Kyrgyz Republic alias let the feed match it (before that every
+    # Kyrgyz place failed closed as "no advisory found").
+    "kyrgyzstan": "https://travel.state.gov/content/tsg_aem/us/en/home/international-travel/travel-advisories/"
+                  "destination.kgz.html (issued 2026-02-10)",
 }
 
 # Regions skipped for editorial/policy reasons, SEPARATE from travel advisories (no feed, no network).
