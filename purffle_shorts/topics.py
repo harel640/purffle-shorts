@@ -95,29 +95,84 @@ def place_coordinates(query: str, lang: str = "en") -> tuple[float, float] | Non
 
 
 # This channel is hidden natural + historic places only. Skip modern attractions: zoos, theme parks, malls,
-# resorts, hotels and the like — recognised by name OR by the article's own description.
-_ATTRACTION_RE = re.compile(
-    r"\b(zoo|safari park|wildlife park|theme park|amusement park|water ?park|aqua ?park|fun ?fair|"
-    r"aquarium|oceanarium|marine park|bird park|dolphinarium|"
-    r"shopping (?:mall|centre|center|complex)|outlet (?:mall|village)|retail park|"
-    r"resort|hotel|casino|golf course|holiday park|caravan park|"
-    r"stadium|convention (?:centre|center)|observation (?:deck|tower|wheel)|ferris wheel)\b", re.I)
-_MALL_RE = re.compile(r"(?<![a-z])malls?(?![a-z])", re.I)
+# resorts, hotels and the like — but only when the place IS one: named as one, or defined as one by its
+# article ("X is a beach resort"). A town that merely HAS resorts or a mall ("a seaside resort town",
+# "hosts the Ulu Ulu Resort", "resort islands") is not one.
+_ATTRACTIONS = (r"zoos?|safari parks?|wildlife parks?|theme parks?|amusement parks?|water ?parks?|aqua ?parks?|"
+                r"fun ?fairs?|aquariums?|oceanariums?|marine parks?|bird parks?|dolphinariums?|"
+                r"shopping (?:malls?|centres?|centers?|complex(?:es)?)|outlet (?:malls?|villages?)|retail parks?|"
+                r"malls?|resorts?|hotels?|casinos?|golf courses?|holiday parks?|caravan parks?|"
+                r"stadiums?|convention (?:centres?|centers?)|observation (?:decks?|towers?|wheels?)|ferris wheels?")
+# Natural areas whose post-1950 dates are when they were protected, not when the place "opened".
+_PROTECTED = (r"national parks?|national (?:protected|scenic) areas?|nature reserves?|wildlife (?:reserves?|"
+              r"sanctuar(?:y|ies))|game reserves?|forest reserves?|biosphere reserves?|bird sanctuar(?:y|ies)|"
+              r"marine (?:reserves?|protected areas?)|protected (?:areas?|landscapes?)|conservation areas?|"
+              r"ramsar sites?|world heritage sites?|geoparks?")
+# The place itself is one of these, so its own opening date counts even though such words are otherwise
+# "a facility at the site".
+_FACILITIES = (r"museums?|galler(?:y|ies)|visitors?'? cent(?:re|er)s?|information cent(?:re|er)s?|"
+               r"interpretation cent(?:re|er)s?|homestays?|lodges?|guest ?houses?|hostels?|hotels?|"
+               r"restaurants?|caf[eé]s?|gift shops?|ticket offices?")
+
+
+def _defined_as(kinds: str) -> re.Pattern:
+    """'<the place> is/was a(n) [up to 4 words] <kind>' — the article's own definition of what the place IS,
+    not a thing it contains. Not when the kind only describes a settlement or area ("a resort town")."""
+    return re.compile(
+        r"\b(?:is|was|are|were)\s+(?:one\s+of\s+the\s+|an?\s+|the\s+|[\w’'-]+[’']s\s+)(?:[\w’'-]+\s+){0,4}?"
+        rf"(?P<kind>{kinds})\b(?!\s+(?:towns?|city|cities|villages?|areas?|regions?|islands?|destinations?|"
+        r"communit(?:y|ies)|districts?|municipalit(?:y|ies)|strips?|coasts?|count(?:y|ies)|provinces?))", re.I)
+
+
+_ATTRACTION_RE = re.compile(rf"\b(?P<kind>{_ATTRACTIONS})\b", re.I)      # in the place's name
+_ATTRACTION_DEF_RE = _defined_as(_ATTRACTIONS)
+_PROTECTED_DEF_RE = _defined_as(_PROTECTED)
+_FACILITY_DEF_RE = _defined_as(_FACILITIES)
+_LEAD_CHARS = 600                 # the article's opening sentences, where it says what the place is
 # "opened/founded/built in YYYY" — used to reject attractions whose only recorded date is after 1950.
 _OPEN_YEAR_RE = re.compile(
     r"\b(?:open(?:ed|ing)?|inaugurat\w*|establish\w*|founded|built|constructed|completed|commissioned)\b"
     r"[^.]{0,40}?\b(1\d{3}|20\d{2})\b", re.I)
+# Dates that are about something else than the place itself opening, so they don't make it "modern":
+_FACILITY_RE = re.compile(rf"\b(?:{_FACILITIES})\b", re.I)               # a museum/lodge/visitor centre AT it
+_RESTORED_RE = re.compile(r"\b(?:restor|renovat|reconstruct|rebuil|conserv|excavat|repair|stabili[sz]|refurbish|"
+                          r"reopen)\w*", re.I)
+_DESIGNATED_RE = re.compile(rf"\b(?:designat\w*|declared|gazetted|inscribed|listed as|unesco|world heritage|"
+                            rf"biosphere|sanctuar(?:y|ies)|{_PROTECTED})\b", re.I)
+_ADMIN_RE = re.compile(r"\b(?:communes?|districts?|municipalit(?:y|ies)|townships?|count(?:y|ies)|subdistricts?|"
+                       r"provinces?|prefectures?)\b[^.]{0,40}\b(?:establish|creat|form|found|merg)\w*|"
+                       r"\b(?:establish|creat|form)\w*\s+as\s+an?\s+(?:commune|district|municipality|township|"
+                       r"county|subdistrict|province|prefecture|city|town)\b", re.I)
+
+
+def _sentence(text: str, start: int, end: int) -> str:
+    a = max(text.rfind(". ", 0, start), text.rfind("\n", 0, start)) + 1
+    ends = [i for i in (text.find(". ", end), text.find("\n", end)) if i != -1]
+    return text[a:min(ends) if ends else len(text)]
 
 
 def modern_attraction_reason(subject: str, article: str = "") -> str:
     """Why ``subject`` is a modern attraction rather than a hidden natural/historic place — or "" if it is
-    fine. Matches zoos / theme parks / malls / resorts / hotels (by name or by the article's description), and
-    any place whose only recorded opening or founding year is after 1950."""
-    blob = f"{subject}\n{article}"
-    m = _ATTRACTION_RE.search(blob) or _MALL_RE.search(blob)
+    fine. Blocks a zoo / theme park / mall / resort / hotel ... when the place IS one (its name, or the
+    article's own definition of it), and a place whose only recorded opening/founding year is after 1950.
+    That year rule ignores dates that aren't the place opening: a museum, visitor centre or lodge AT the site,
+    a restoration, a protected-area or heritage designation, or an administrative change. (The year it
+    "opened to the public" still counts: a 2016 glass bridge is modern even in a region with old history.)"""
+    lead = article[:_LEAD_CHARS]
+    m = _ATTRACTION_RE.search(subject or "") or _ATTRACTION_DEF_RE.search(lead)
     if m:
-        return f"looks like a {m.group(0).strip().lower()}"
-    years = [int(y) for y in _OPEN_YEAR_RE.findall(article)]
+        return f"looks like a {m.group('kind').strip().lower()}"
+    if _PROTECTED_DEF_RE.search(lead):
+        return ""                 # a national park / nature reserve: its dates are when it was protected
+    is_facility = bool(_FACILITY_DEF_RE.search(lead))       # the place IS a museum etc.: its date counts
+    years = []
+    for y in _OPEN_YEAR_RE.finditer(article):
+        s = _sentence(article, y.start(), y.end())
+        if _RESTORED_RE.search(s) or _DESIGNATED_RE.search(s) or _ADMIN_RE.search(s):
+            continue
+        if not is_facility and _FACILITY_RE.search(s):
+            continue
+        years.append(int(y.group(1)))
     if years and min(years) > 1950:
         return f"opened {min(years)} (after 1950)"
     return ""

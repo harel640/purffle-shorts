@@ -18,7 +18,7 @@ class FakeLLM:
 
 
 # --------------------------------------------------------------- safety filter
-FEED = {"burma": 4, "india": 2, "saudi arabia": 3, "thailand": 1}
+FEED = {"burma": 4, "india": 2, "saudi arabia": 3, "thailand": 1, "vietnam": 1}
 
 
 def test_safety_blocks_myanmar(monkeypatch):
@@ -68,10 +68,23 @@ def test_safety_skips_when_region_unknown(monkeypatch):
 
 
 def test_safety_no_regional_check_for_plain_country(monkeypatch):
-    # Thailand (Level 1) is not in the regional-warnings map, so a missing region is fine.
+    # Vietnam (Level 1, no higher-risk areas) is not in the regional-warnings map, so a missing region is fine.
     monkeypatch.setattr(safety, "advisories", lambda: FEED)
-    v = safety.check("Chiang Mai, Thailand", FakeLLM({"country": "Thailand", "aliases": [], "region": ""}))
+    v = safety.check("Hoi An, Vietnam", FakeLLM({"country": "Vietnam", "aliases": [], "region": ""}))
     assert not v.unsafe and v.level == 1
+
+
+def test_uncurated_country_is_blocked_whole_until_its_areas_are_listed(monkeypatch):
+    # Thailand's advisory names higher-risk areas that aren't curated yet: every Thai place fails closed,
+    # even a safe-looking one and even though the country itself is Level 1.
+    monkeypatch.setattr(safety, "advisories", lambda: FEED)
+    v = safety.check("Chiang Mai, Thailand", FakeLLM({"country": "Thailand", "aliases": [], "region": "Chiang Mai"}))
+    assert v.unsafe and "not curated" in v.reason
+    for c in ("Thailand", "Indonesia", "Laos", "Cambodia", "Nepal", "Bangladesh", "Tajikistan"):
+        assert safety.verdict_for(safety.country_names(c), "anywhere").unsafe, c
+    monkeypatch.setattr(safety, "UNCURATED_COUNTRIES", {})          # once curated, the normal rules apply
+    assert not safety.check("Chiang Mai, Thailand",
+                            FakeLLM({"country": "Thailand", "aliases": [], "region": "Chiang Mai"})).unsafe
 
 
 # --------------------------------------------------------------- sensitive regions (separate from advisories)
