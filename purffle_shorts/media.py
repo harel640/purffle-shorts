@@ -290,16 +290,31 @@ def _wiki_item(pg: dict, rank: int, min_px: int, query: str = "") -> MediaItem |
                      extra={"wiki_title": _wiki_title(title)})
 
 
+def _commons_query(params: dict, what: str) -> dict:
+    """One Commons API query. Commons answers HTTP 200 with an ``error`` body when it is overloaded ("Search
+    is currently too busy") — treated as a retryable failure, never as "no images" (which would wrongly skip
+    a place for having too few photos)."""
+    def call() -> dict:
+        r = http().get(_WIKI_API, timeout=30, headers={"User-Agent": _WIKI_UA}, params=params)
+        raise_for_status(r, what)
+        data = r.json()
+        err = data.get("error") if isinstance(data, dict) else None
+        if err:
+            raise RuntimeError(f"{what}: {err.get('info') or err.get('code') or err}")
+        return data
+    return with_retries(call, attempts=3, base_delay=3, label=what)
+
+
 def wikimedia_images(query: str, limit: int = 20, min_px: int = 800) -> list[MediaItem]:
     """Freely-licensed (public-domain / CC-BY / CC-BY-SA) photos of ``query`` from Wikimedia Commons.
     Author and license are captured on each item so the video can credit them as the licenses require.
     Maps/diagrams and butchery/carcass images are dropped outright."""
-    r = http().get(_WIKI_API, timeout=30, headers={"User-Agent": _WIKI_UA}, params={
+    data = _commons_query({
         "action": "query", "format": "json", "formatversion": 2,
         "generator": "search", "gsrsearch": f"filetype:bitmap {query}", "gsrnamespace": 6,
-        "gsrlimit": limit, "prop": "imageinfo", "iiprop": "url|size|extmetadata", "iiurlwidth": 1600})
-    raise_for_status(r, "Wikimedia Commons search")
-    pages = (r.json().get("query") or {}).get("pages") or []
+        "gsrlimit": limit, "prop": "imageinfo", "iiprop": "url|size|extmetadata", "iiurlwidth": 1600},
+        "Wikimedia Commons search")
+    pages = (data.get("query") or {}).get("pages") or []
     items: list[MediaItem] = []
     for rank, pg in enumerate(sorted(pages, key=lambda p: p.get("index", 999))):
         it = _wiki_item(pg, rank, min_px, query)
@@ -312,13 +327,12 @@ def geosearch_images(lat: float, lon: float, radius_m: int = 5000, limit: int = 
                      min_px: int = 800) -> list[MediaItem]:
     """Freely-licensed Commons photos geotagged within ``radius_m`` of (lat, lon). For a small or obscure
     place, a name search returns little or the wrong place; geosearch finds the photos actually taken there."""
-    r = http().get(_WIKI_API, timeout=30, headers={"User-Agent": _WIKI_UA}, params={
+    data = _commons_query({
         "action": "query", "format": "json", "formatversion": 2,
         "generator": "geosearch", "ggscoord": f"{lat}|{lon}", "ggsradius": int(max(10, min(10000, radius_m))),
         "ggsnamespace": 6, "ggslimit": limit,
-        "prop": "imageinfo", "iiprop": "url|size|extmetadata", "iiurlwidth": 1600})
-    raise_for_status(r, "Wikimedia geosearch")
-    pages = (r.json().get("query") or {}).get("pages") or []
+        "prop": "imageinfo", "iiprop": "url|size|extmetadata", "iiurlwidth": 1600}, "Wikimedia geosearch")
+    pages = (data.get("query") or {}).get("pages") or []
     items: list[MediaItem] = []
     for rank, pg in enumerate(sorted(pages, key=lambda p: p.get("index", 999))):
         it = _wiki_item(pg, rank, min_px, query="")

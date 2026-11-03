@@ -19,7 +19,8 @@ from pathlib import Path
 
 from . import analytics, crosspost, ffmpeg, notify, seo, sfx, topics, tts, youtube
 from .config import Settings
-from .history import History, now_iso
+# Place de-duplication lives in history.py (no heavy imports) so other tools can apply the same rule.
+from .history import PLACE_REUSE_DAYS, History, now_iso, place_recently_used  # noqa: F401 (re-exported)
 from .llm import LLM, LLMConfigError
 from . import factcheck, safety
 from .media import MediaItem, NeuronBudget, SkipTopic, Visuals, background_item, resolve_place
@@ -51,28 +52,6 @@ AI_SOURCES = {"openai-images", "ai", "dalle", "gpt-image", "pollinations", "clou
 REUSABLE_SOURCES = {"generated", "local", "background"} | AI_SOURCES
 # Added to the description (and the YouTube synthetic-content disclosure is set) whenever a video uses AI images.
 AI_DISCLOSURE = "Some scenes are AI illustrations."
-
-PLACE_REUSE_DAYS = 90    # don't let the autopilot pick a place already made within this many days
-
-# Generic words stripped when comparing place names, so "Hampi", "Hampi, India" and "Vittala Temple, Hampi"
-# all reduce to the same distinctive token ("hampi").
-_PLACE_GENERIC = {"temple", "temples", "city", "town", "fort", "ruins", "ruin", "old", "ancient", "great",
-                  "palace", "site", "complex", "valley", "river", "lake", "mount", "hill", "cave", "caves",
-                  "monastery", "stupa", "pagoda", "the", "of", "and", "at", "national", "park"}
-
-
-def _place_tokens(text: str, extra_stop: frozenset[str] = frozenset()) -> set[str]:
-    stop = _PLACE_GENERIC | extra_stop
-    return {t for t in re.findall(r"[a-z]+", (text or "").lower()) if len(t) > 2 and t not in stop}
-
-
-def place_recently_used(place: str, country: str, recent_places: list[str]) -> bool:
-    """True when ``place`` shares a distinctive name token with any recently-made place, so a place is matched
-    by what it resolves to rather than by the exact title (e.g. 'Hampi' == 'Vittala Temple, Hampi')."""
-    key = _place_tokens(place, frozenset(re.findall(r"[a-z]+", (country or "").lower())))
-    if not key:
-        return False
-    return any(key & _place_tokens(rp) for rp in recent_places)
 
 # Rough share of the work done when each stage starts (for progress bars before any timing is learned).
 STAGES = {"topic": 2, "script": 8, "review": 20, "voice": 32, "footage": 45, "captions": 62, "render": 72,
