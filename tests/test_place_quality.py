@@ -40,6 +40,48 @@ def test_hidden_natural_or_historic_place_is_not_flagged():
         "Hampi", "Hampi was the capital of the Vijayanagara Empire, founded in the 14th century.") == ""
 
 
+@pytest.mark.parametrize("subject, article", [
+    # A date of something AT a historic site, not the site opening (Koh Ker: a 10th-century temple city).
+    ("Koh Ker, Cambodia", "Koh Ker is a remote archaeological site in northern Cambodia, capital of the Khmer "
+     "empire in the 10th century. Travellers can stay in Koh Ker Jungle Lodge Homestay, a sustainable tourism "
+     "project built in the village of Koh Ker in 2009. A visitor centre opened in 2015."),
+    ("Ta Prohm, Cambodia", "Ta Prohm is a temple built in the 12th century. Restoration work completed in 2013 "
+     "stabilised the galleries."),
+    # A town that HAS resorts is not a resort (Kep); nor is a park that hosts one, or an atoll with resort islands.
+    ("Kep, Cambodia", "Kep is a seaside resort town in southern Cambodia, founded as a French colonial retreat "
+     "in 1908. It has several resorts and hotels."),
+    ("Ulu Temburong National Park, Brunei", "Ulu Temburong National Park is the first national park to be "
+     "established in Brunei, protected since 1991. It hosts the Ulu Ulu Resort."),
+    ("Baa Atoll, Maldives", "Baa Atoll is a natural atoll. The atoll hosts several resort islands."),
+    ("Nam Et-Phou Louey, Laos", "Nam Et-Phou Louey is a protected area in northern Laos. Visitors enjoy wildlife "
+     "viewing from the observation tower (under construction) nearby."),
+    # A natural area's post-1950 date is when it was protected; a commune's is an administrative change.
+    ("Nino Konis Santana National Park, Timor-Leste", "Nino Konis Santana National Park is Timor-Leste's first "
+     "national park. The park, established on 15 August 2007, covers 1,236 square kilometres."),
+    ("Koshi Tappu, Nepal", "Koshi Tappu Wildlife Reserve is a protected area in the Terai. It was established in "
+     "1976 and designated as a Ramsar site in December 1987."),
+    ("Pu Luong, Vietnam", "Pu Luong is a commune of Thanh Hoa province, Vietnam. The commune was established on "
+     "16 June 2025 on the basis of merging the former communes."),
+])
+def test_modern_attraction_rule_ignores_facilities_restorations_designations(subject, article):
+    assert T.modern_attraction_reason(subject, article) == "", subject
+
+
+@pytest.mark.parametrize("subject, article, kind", [
+    ("Nusa Dua, Indonesia", "Nusa Dua is a beach resort on the Bukit peninsula.", "resort"),
+    ("Marina Bay Sands, Singapore", "Marina Bay Sands is an integrated resort fronting Marina Bay.", "resort"),
+    ("Genting Highlands, Malaysia", "Genting Highlands is a hill resort in Pahang.", "resort"),
+    ("Siam Paragon, Thailand", "Siam Paragon is a shopping mall in Bangkok.", "shopping mall"),
+    # Its own opening counts, even when other words in the sentence are "facilities" or the region is historic.
+    ("Zhangjiajie Glass Bridge, China", "Zhangjiajie Glass Bridge is a skywalk bridge above Wulingyuan, a region "
+     "settled since the Ming dynasty. The bridge, opened to the public on 20 August 2016, is 430 m long.", "2016"),
+    ("Heritage Museum, Malaysia", "The Heritage Museum is a museum of the region's 15th-century sultanate. The "
+     "museum opened in 2005.", "2005"),
+])
+def test_modern_attraction_rule_still_blocks_what_is_one(subject, article, kind):
+    assert kind in T.modern_attraction_reason(subject, article), subject
+
+
 # ---------------------------------------------------------------- 2. real-history gate (history vs place)
 def test_has_real_history_detects_pre_1900():
     assert T.has_real_history("The temple was built in 1150 by the Hoysala dynasty.")

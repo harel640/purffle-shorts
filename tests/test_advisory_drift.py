@@ -31,19 +31,27 @@ def test_feed_entries_parse_level_date_areas_and_normalise_titles():
     assert e["vietnam"].areas is False and e["burma"].level == 4
 
 
-def test_drift_flags_stale_listed_countries_and_unlisted_risk_areas():
+def test_drift_flags_stale_listed_countries_and_unlisted_risk_areas(monkeypatch):
+    monkeypatch.setattr(safety, "UNCURATED_COUNTRIES", {})
     drift = dict(safety.advisory_drift(safety.advisory_entries(FEED), countries=ASIA))
-    assert "colombia" in drift and "Level 3" in drift["colombia"]          # whole country now blocked
     assert "philippines" in drift and "2026-11-02" in drift["philippines"]  # reissued after the review date
-    assert "egypt" in drift and "missing" in drift["egypt"]
     assert "thailand" in drift and "not in REGIONAL_WARNINGS" in drift["thailand"]
-    assert "india" not in drift and "mexico" not in drift                  # unchanged since review
+    assert "india" not in drift                                             # unchanged since review
     assert "vietnam" not in drift and "burma" not in drift                 # no areas / blocked outright
     assert "georgia" not in drift                                           # outside the channel's countries
+    assert "colombia" not in drift and "egypt" not in drift                 # listed, but outside the channel
 
 
 def test_drift_without_scope_checks_every_country():
-    assert "georgia" in dict(safety.advisory_drift(safety.advisory_entries(FEED)))
+    drift = dict(safety.advisory_drift(safety.advisory_entries(FEED)))
+    assert "colombia" in drift and "Level 3" in drift["colombia"]          # whole country now blocked
+    assert "egypt" in drift and "missing" in drift["egypt"]
+    assert "georgia" in drift and "mexico" not in drift
+
+
+def test_uncurated_country_keeps_being_reported_until_listed():
+    drift = dict(safety.advisory_drift(safety.advisory_entries(FEED), countries=ASIA))
+    assert "thailand" in drift and "whole country blocked" in drift["thailand"]
 
 
 def test_drift_is_empty_when_the_feed_matches_the_list(monkeypatch):
@@ -67,7 +75,7 @@ def test_kyrgyzstan_matches_the_feeds_kyrgyz_republic(monkeypatch):
 
 
 def test_verdict_for_matches_check_without_an_llm(monkeypatch):
-    monkeypatch.setattr(safety, "advisories", lambda: {"india": 2, "burma": 4, "thailand": 1})
+    monkeypatch.setattr(safety, "advisories", lambda: {"india": 2, "burma": 4, "vietnam": 1})
     assert not safety.verdict_for(safety.country_names("India"), "Karnataka").unsafe
     assert safety.verdict_for(safety.country_names("India"), "Jammu and Kashmir").unsafe
     assert safety.verdict_for(safety.country_names("India"), "").unsafe          # region unknown: fail closed

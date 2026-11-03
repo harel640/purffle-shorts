@@ -57,6 +57,28 @@ REGIONAL_WARNINGS: dict[str, list[tuple[str, int]]] = {
 # listed country whose advisory was reissued after this, so the list is re-read rather than silently aging.
 REGIONAL_WARNINGS_REVIEWED = "2026-10-31"
 
+# Level 1-2 countries whose advisory names Level 3-4 areas that are NOT curated into REGIONAL_WARNINGS yet:
+# blocked as a WHOLE country (fail closed) until someone reads the advisory and lists its areas above. Each
+# entry: the advisory page and why it isn't curated. Remove the entry once its areas are in REGIONAL_WARNINGS.
+UNCURATED_COUNTRIES: dict[str, str] = {
+    # 2026-11-03: the feed flags higher-risk areas, but every advisory page below shows a "verify you are
+    # human" check, so its named areas could not be read. Advisory issue dates are from the feed.
+    "thailand": "https://travel.state.gov/content/tsg_aem/us/en/home/international-travel/travel-advisories/"
+                "destination.tha.html (issued 2026-07-07)",
+    "indonesia": "https://travel.state.gov/content/tsg_aem/us/en/home/international-travel/travel-advisories/"
+                 "destination.idn.html (issued 2026-07-07)",
+    "laos": "https://travel.state.gov/content/tsg_aem/us/en/home/international-travel/travel-advisories/"
+            "destination.lao.html (issued 2026-07-28)",
+    "cambodia": "https://travel.state.gov/content/tsg_aem/us/en/home/international-travel/travel-advisories/"
+                "destination.khm.html (issued 2026-09-15)",
+    "nepal": "https://travel.state.gov/content/tsg_aem/us/en/home/international-travel/travel-advisories/"
+             "destination.npl.html (issued 2026-09-04)",
+    "bangladesh": "https://travel.state.gov/content/tsg_aem/us/en/home/international-travel/travel-advisories/"
+                  "destination.bgd.html (issued 2026-07-30)",
+    "tajikistan": "https://travel.state.gov/content/tsg_aem/us/en/home/international-travel/travel-advisories/"
+                  "destination.tjk.html (issued 2026-09-04)",
+}
+
 # Regions skipped for editorial/policy reasons, SEPARATE from travel advisories (no feed, no network).
 # Extend by adding a region name mapped to the keywords (province, major places, common identifiers)
 # that mark it.
@@ -182,7 +204,8 @@ def advisory_drift(entries: list[Advisory], countries: list[str] | None = None,
       * a listed country is missing from the feed, is now Level 3-4 overall (a regional entry only makes
         sense for a Level 1-2 country), or had its advisory reissued after the list was ``reviewed``;
       * an unlisted Level 1-2 country whose advisory says some areas carry a higher risk — it has Level 3-4
-        areas the list doesn't name. ``countries`` limits this to the countries a channel covers."""
+        areas the list doesn't name (or it is in UNCURATED_COUNTRIES: blocked whole until they are listed).
+    ``countries`` limits both checks to the countries a channel covers."""
     def find(names: list[str]) -> Advisory | None:
         for e in entries:
             if e.country in names:
@@ -191,9 +214,13 @@ def advisory_drift(entries: list[Advisory], countries: list[str] | None = None,
 
     out: list[tuple[str, str]] = []
     listed: set[str] = set()
+    scope = {n for c in countries for n in country_names(c)} if countries else None
+    uncurated = {n for c in UNCURATED_COUNTRIES for n in country_names(c)}
     for c in REGIONAL_WARNINGS:
         names = country_names(c)
         listed.update(names)
+        if scope is not None and not set(names) & scope:
+            continue
         e = find(names)
         if e is None:
             out.append((c, "listed in REGIONAL_WARNINGS but missing from the advisory feed"))
@@ -202,15 +229,18 @@ def advisory_drift(entries: list[Advisory], countries: list[str] | None = None,
                            f"entry is out of date"))
         elif e.issued and e.issued > reviewed:
             out.append((c, f"advisory reissued {e.issued}, after REGIONAL_WARNINGS was reviewed ({reviewed})"))
-    scope = {n for c in countries for n in country_names(c)} if countries else None
     for e in entries:
         if e.level >= BLOCK_LEVEL or not e.areas:
             continue
         names = set(country_names(e.country))
         if names & listed or (scope is not None and not names & scope):
             continue
-        out.append((e.country, f"Level {e.level} overall but the advisory names higher-risk areas that are not "
-                               f"in REGIONAL_WARNINGS"))
+        if names & uncurated:
+            out.append((e.country, "whole country blocked until the higher-risk areas named in its advisory are "
+                                   "added to REGIONAL_WARNINGS"))
+        else:
+            out.append((e.country, f"Level {e.level} overall but the advisory names higher-risk areas that are "
+                                   f"not in REGIONAL_WARNINGS"))
     return out
 
 
@@ -284,6 +314,10 @@ def verdict_for(names: list[str], region: str = "") -> Verdict:
     region = (region or "").strip().lower()
     if not names:
         return Verdict(False)
+    uncurated = next((n for n in names if n in UNCURATED_COUNTRIES), None)
+    if uncurated:
+        return Verdict(True, f"{uncurated.title()}: its advisory names Level 3-4 areas that are not curated yet "
+                             f"- whole country blocked until they are", uncurated)
     try:
         feed = advisories()
     except Exception as e:
