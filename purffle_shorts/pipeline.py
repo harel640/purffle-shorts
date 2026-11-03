@@ -159,14 +159,99 @@ def plan_ai_scenes(historical: list[bool]) -> list[bool]:
     return hist
 
 
-def final_title(script: Script, settings: Settings | None = None, text: str | None = None) -> str:
+TITLE_MAX = 59           # a place Short's whole title, " #shorts" included, stays under 60 characters
+# Generic trailing words dropped from a place name for the title ("Gunung Mulu National Park" -> "GUNUNG MULU").
+_LABEL_DROP = {"national", "park", "parks", "wildlife", "nature", "reserve", "sanctuary", "protected", "area",
+               "scenic", "district", "county", "province", "prefecture", "region", "complex", "site",
+               "archaeological", "cultural", "landscape"}
+
+
+def place_label(place: str) -> str:
+    """The place's name for the front of a title: its first one or two words, in capitals."""
+    words = re.split(r"[,(]", place or "")[0].split()
+    while len(words) > 2 and words[-1].lower() in _LABEL_DROP:
+        words.pop()
+    return " ".join(words[:2]).upper()
+
+
+def place_title(text: str, place: str, fallback: str = "") -> str:
+    """'HAMPI: The Richest City That Vanished #shorts' - the place name first, then the hook, under 60
+    characters in all. A place name the writer put in front anyway is not repeated. A hook too long to fit
+    gives way to ``fallback`` (the short on-screen hook) rather than being cut off mid-sentence."""
+    label = place_label(place)
+    budget = TITLE_MAX - len(" #shorts") - len(label) - len(": ")
+
+    def clean(h: str) -> str:
+        h = (h or "").strip().strip("\"'")
+        for name in dict.fromkeys([label, re.split(r"[,(]", place or "")[0].strip()]):
+            if name and h.lower().startswith(name.lower()):
+                h = h[len(name):].lstrip(" :;,-–—")
+        return h[:1].upper() + h[1:]
+
+    hook, alt = clean(text), clean(fallback)
+    if len(hook) > budget and alt and len(alt) <= budget:
+        hook = alt
+    hook = truncate_words(hook, budget) if budget >= 10 else ""
+    return f"{label}: {hook} #shorts" if hook else f"{label} #shorts"
+
+
+def _hashtag(text: str) -> str:
+    """'Sri Lanka' -> '#SriLanka', 'Shirakawa-go' -> '#ShirakawaGo'."""
+    return "#" + "".join(w[:1].upper() + w[1:] for w in re.findall(r"[^\W_]+", text or ""))
+
+
+def place_description(summary: str, place: str, country: str, tags: list[str], extra: list[str]) -> str:
+    """A place Short's description: one sentence naming the place and its country, then 3-5 keywords, then
+    #shorts #<Place> #<Country> #travel, then the credits/source blocks (which the image licenses require).
+    Hashtags are fixed here rather than taken from the writer, so nothing like #viralshorts gets in."""
+    name = re.split(r"[,(]", place or "")[0].strip()
+    first = re.split(r"(?<=[.!?])\s+", (summary or "").strip(), maxsplit=1)[0].strip()
+    if not first:
+        first = f"The story of {name}, {country}." if country else f"The story of {name}."
+    elif name and name.lower() not in first.lower():
+        first = f"{name}{', ' + country if country else ''}: {first}"
+    elif country and country.lower() not in first.lower():
+        first = f"{first.rstrip('.!?')}, in {country}."
+    keywords: list[str] = []
+    for k in list(tags or []) + [name, f"{name} {country}".strip(), f"{country} travel".strip()]:
+        k = str(k).strip()
+        if k and not k.startswith("#") and not re.search(r"(?i)shorts|viral|^short$", k) \
+                and k.lower() not in (x.lower() for x in keywords):
+            keywords.append(k)
+    hashtags = list(dict.fromkeys(h for h in ("#shorts", _hashtag(name), _hashtag(country), "#travel")
+                                  if len(h) > 1))
+    parts = [first, "Keywords: " + ", ".join(keywords[:5]), " ".join(hashtags)] + list(extra or [])
+    return "\n\n".join(p for p in parts if p)
+
+
+def final_title(script: Script, settings: Settings | None = None, text: str | None = None,
+                place: str = "") -> str:
     t = script.title if text is None else text
     if settings is not None and not settings.vertical:
         return truncate_words(t, 100)  # a 16:9 video is not a Short
+    if place:
+        return place_title(t, place, fallback=script.hook_text.title() if script.hook_text.isupper()
+                           else script.hook_text)
     # Keep the base title under 60 even after a fact-check rewrite (which runs after the writer's own cap),
     # before the " #shorts" tag is appended.
     t = truncate_words(t, 60)
     return f"{t} #shorts" if len(t) + 8 <= 100 else truncate_words(t, 100)
+
+
+def grounding_article(pick: Topic, lang: str = "en") -> tuple[str, str]:
+    """(text, url) of the Wikipedia article a story is grounded in. A listed place names its exact article,
+    which is looked up by that title, never searched for (a search once turned "Ban Rak Thai" into a political
+    party's article); if it is missing the topic is skipped rather than grounded in a guess. The article's
+    canonical title and coordinates are kept on ``pick``. Other topics use the best search match."""
+    if not pick.wiki_title:
+        return topics.article(pick.subject, lang)
+    page = topics.article_page(pick.wiki_title, lang)
+    if not page:
+        raise SkipTopic(f"Wikipedia article {pick.wiki_title!r} for this listed place not found")
+    pick.wiki_title = page["title"]
+    if pick.lat is None and page["lat"] is not None:
+        pick.lat, pick.lon = page["lat"], page["lon"]
+    return page["text"], page["url"]
 
 
 def image_credits_block(creds: list[dict]) -> str:
@@ -187,8 +272,11 @@ def image_credits_block(creds: list[dict]) -> str:
 
 
 def final_description(script: Script, credits: set[str], settings: Settings, text: str | None = None,
-                      extra: list[str] | None = None) -> str:
+                      extra: list[str] | None = None, place: str = "", country: str = "") -> str:
     body = (script.description if text is None else text).strip()
+    if place and settings.vertical:
+        footage = ["Footage: " + ", ".join(sorted(credits))] if settings.credit_footage and credits else []
+        return place_description(body, place, country, script.tags, footage + list(extra or []))
     parts = [body] if body else []
     tags = script.hashtags if settings.vertical else [h for h in script.hashtags if h.lower() != "#shorts"]
     parts.append(" ".join(tags))
@@ -360,7 +448,7 @@ class Studio:
             # gates out modern attractions, and every factual claim the writer makes must come from it.
             if (self.llm is not None and not s.offline and not pick.source_text
                     and (style == "history" or place_locked_channel)):
-                text, url = topics.article(pick.subject, s.language.split("-")[0])
+                text, url = grounding_article(pick, s.language.split("-")[0])
                 if text:
                     pick.source_text, pick.source_url = text, url
                     pick.context = (pick.context + "\n\n" + text).strip() if pick.context else text
@@ -388,7 +476,7 @@ class Studio:
                     log.info("YouTube searches: %s", "; ".join(pick.keywords[:4]))
             script = write_script(self.llm, pick.subject, s, source=pick.source, avoid=self.history.recent_titles(),
                                   context=pick.context, style=style, insights=insights,
-                                  keywords=seo.keywords_block(pick.keywords))
+                                  keywords=seo.keywords_block(pick.keywords), place_title=place_locked_channel)
             if self.llm is not None and s.script_review != "off":
                 self._step("review", "Script Doctor")
                 script = review_script(self.llm, script, s)
@@ -487,6 +575,8 @@ class Studio:
             # Place-locked visuals (Wikimedia): resolve the real place and, before spending any time,
             # run the travel-advisory check on that concrete place (not just the generic topic).
             place = country = ""
+            coords: tuple[float, float] | None = None
+            wiki_page = pick.wiki_title or topics.wiki_page_title(pick.source_url)
             image_credits: list[dict] = []
             place_locked = (media_map is None and self.llm is not None and not s.offline
                             and "wikimedia" in [x.lower() for x in s.visual_sources])
@@ -501,11 +591,19 @@ class Studio:
                     v = safety.check(", ".join(x for x in (place, country) if x), self.llm)
                     if v.unsafe:
                         raise safety.UnsafeTopic(v.reason)
-                # Don't let the autopilot repeat a place made recently (matched by resolved place, not title).
-                # A user who explicitly asks for a topic (source "manual"/url/document) is never blocked.
+                # Coordinates: a listed place's own article; otherwise the best-matching article for the place.
+                coords = ((pick.lat, pick.lon) if pick.lat is not None and pick.lon is not None else
+                          topics.place_coordinates(", ".join(x for x in (place, country) if x) or place,
+                                                   s.language.split("-")[0]))
+                # Don't let the autopilot repeat a place made recently: the same Wikipedia page or coordinates
+                # (two names for one place), not a shared word. A user who explicitly asks for a topic (source
+                # "manual"/url/document) is never blocked.
                 if pick.source not in ("manual", "script", "clip", "url", "document"):
-                    if place_recently_used(place, country, self.history.recent_places(PLACE_REUSE_DAYS)):
-                        raise SkipTopic(f"place '{place}' was already used in the last {PLACE_REUSE_DAYS} days")
+                    why = self.history.place_recently_made(
+                        wiki_page=wiki_page, lat=coords[0] if coords else None, lon=coords[1] if coords else None,
+                        place=place, country=country, days=PLACE_REUSE_DAYS)
+                    if why:
+                        raise SkipTopic(f"place '{place}' was already made in the last {PLACE_REUSE_DAYS} days ({why})")
             # Sensitive-region policy skip (separate from travel advisories): by the RESOLVED place's
             # region/province ONLY — not by words that merely appear in the narration or article. A village
             # that mentions a nearby border (e.g. Chitkul near Tibet) is not in that region and is not blocked;
@@ -555,8 +653,6 @@ class Studio:
                     if script.scenes:
                         log.info("Scenes: %d total, %d AI, %d real photos (first & last real)",
                                  len(hist), sum(hist), len(hist) - sum(hist))
-                    coords = topics.place_coordinates(", ".join(x for x in (place, country) if x) or place,
-                                                      s.language.split("-")[0])
                     if coords:
                         log.info("Coordinates: %.4f, %.4f (Commons images within 5 km)", *coords)
                     per_scene = visuals.for_place_scenes(
@@ -622,22 +718,26 @@ class Studio:
 
             # YouTube's synthetic-content disclosure and the description line go on only when AI images were used.
             used_ai = s.synthetic_media and any(m is not None and m.source in AI_SOURCES for m in media)
-            title = final_title(script, s)
+            # A place Short leads with the place's name (the listed place's own name when there is one).
+            label_place, label_country = pick.place or place, pick.country or country
+            title = final_title(script, s, place=label_place)
             credit_block = image_credits_block(image_credits) if s.credit_footage else ""
             extra = ([credit_block] if credit_block else []) + ([EMOJI_CREDIT] if plan.emoji and s.credit_footage else [])
             if used_ai:
                 extra.append(AI_DISCLOSURE)
             if pick.source_url:
                 extra.append(f"Source: {pick.source_url}")
-            description = final_description(script, credits, s, extra=extra)
+            description = final_description(script, credits, s, extra=extra, place=label_place,
+                                            country=label_country)
             localizations = {}
             wanted = [x for x in s.localize_metadata if x != s.language]
             if wanted and self.llm is not None and not s.offline:
                 try:
                     for lang, v in localize_metadata(self.llm, script, wanted).items():
-                        localizations[lang] = {"title": final_title(script, s, v["title"]),
+                        localizations[lang] = {"title": final_title(script, s, v["title"], place=label_place),
                                                "description": final_description(script, credits, s,
-                                                                                v["description"], extra)}
+                                                                                v["description"], extra,
+                                                                                label_place, label_country)}
                     log.info("Title and description localised: %s", ", ".join(localizations) or "none")
                 except Cancelled:
                     raise
@@ -665,7 +765,8 @@ class Studio:
                 language=s.language, title=title, description=description, tags=script.tags,
                 folder=str(folder), video_path=str(video), duration=info["duration"],
                 llm=meta["llm"], voice=meta["voice"], status="rendered", score=script.score, parent_id=parent_id,
-                resolved_place=(", ".join(x for x in (place, country) if x) or None))
+                resolved_place=(", ".join(x for x in (place, country) if x) or None),
+                wiki_page=wiki_page or None, lat=coords[0] if coords else None, lon=coords[1] if coords else None)
             state["record_id"] = rid
             if not media_map:
                 self.history.mark_media([m.key for m in media if m.source not in REUSABLE_SOURCES])

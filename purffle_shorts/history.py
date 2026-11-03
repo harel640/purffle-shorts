@@ -5,6 +5,7 @@ planner, and view counts for the videos that are live."""
 from __future__ import annotations
 
 import json
+import math
 import re
 import sqlite3
 import threading
@@ -25,6 +26,42 @@ _PLACE_GENERIC = {"temple", "temples", "city", "town", "fort", "ruins", "ruin", 
 def _place_tokens(text: str, extra_stop: frozenset[str] = frozenset()) -> set[str]:
     stop = _PLACE_GENERIC | extra_stop
     return {t for t in re.findall(r"[a-z]+", (text or "").lower()) if len(t) > 2 and t not in stop}
+
+
+SAME_PLACE_KM = 3.0      # two places this close are one place for de-duplication (Hampi / Vittala Temple)
+
+
+def distance_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Great-circle distance in km."""
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    a = (math.sin((p2 - p1) / 2) ** 2
+         + math.cos(p1) * math.cos(p2) * math.sin(math.radians(lon2 - lon1) / 2) ** 2)
+    return 6371.0 * 2 * math.asin(min(1.0, math.sqrt(a)))
+
+
+def _page_key(title: str | None) -> str:
+    return re.sub(r"\s+", " ", (title or "").replace("_", " ")).strip().casefold()
+
+
+def same_place(a: dict, b: dict) -> str:
+    """Why places ``a`` and ``b`` ({wiki_page, lat, lon, place, country}) are the same place, or "".
+    By the Wikipedia page (one article, whatever it is called - "Crystal Monastery" is "Shey Gompa") or by
+    coordinates within SAME_PLACE_KM. Names are compared only when neither page nor coordinates can be: two
+    different places that share a word ("Shey Palace", Ladakh vs "Shey Gompa", Nepal) are NOT the same."""
+    pa, pb = _page_key(a.get("wiki_page")), _page_key(b.get("wiki_page"))
+    if pa and pb and pa == pb:
+        return f"same Wikipedia page ({a.get('wiki_page') or b.get('wiki_page')})"
+    coords = all(isinstance(x, (int, float)) for x in (a.get("lat"), a.get("lon"), b.get("lat"), b.get("lon")))
+    if coords:
+        d = distance_km(a["lat"], a["lon"], b["lat"], b["lon"])
+        if d <= SAME_PLACE_KM:
+            return f"{d:.1f} km apart"
+    if (pa and pb) or coords:
+        return ""                  # comparable by page/coordinates, and they differ: different places
+    name_b = b.get("resolved_place") or ", ".join(x for x in (b.get("place"), b.get("country")) if x)
+    if name_b and place_recently_used(a.get("place") or "", a.get("country") or "", [name_b]):
+        return f"same name as {name_b!r}"
+    return ""
 
 
 def place_recently_used(place: str, country: str, recent_places: list[str]) -> bool:
@@ -69,6 +106,8 @@ VIDEO_COLUMNS = {
     "parent_id": "INTEGER",        # the original video when this one is a translated copy
     "views": "INTEGER", "likes": "INTEGER", "comments": "INTEGER", "stats_at": "TEXT",
     "resolved_place": "TEXT",      # the real place a video resolved to (for place-based de-duplication)
+    "wiki_page": "TEXT",           # its Wikipedia article (canonical title): "Crystal Monastery" == "Shey Gompa"
+    "lat": "REAL", "lon": "REAL",  # its coordinates: two names for one spot are the same place
 }
 
 
@@ -147,6 +186,18 @@ class History:
         cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat(timespec="seconds")
         return [r["resolved_place"] for r in self._all(
             "SELECT resolved_place FROM videos WHERE resolved_place IS NOT NULL AND created_at >= ?", (cutoff,))]
+
+    def place_recently_made(self, *, wiki_page: str = "", lat: float | None = None, lon: float | None = None,
+                            place: str = "", country: str = "", days: int = PLACE_REUSE_DAYS) -> str:
+        """Why this place was already made in the last ``days`` days (see same_place), or "" if it wasn't."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat(timespec="seconds")
+        me = {"wiki_page": wiki_page, "lat": lat, "lon": lon, "place": place, "country": country}
+        for r in self._all("SELECT resolved_place, wiki_page, lat, lon FROM videos WHERE created_at >= ? AND "
+                           "(resolved_place IS NOT NULL OR wiki_page IS NOT NULL OR lat IS NOT NULL)", (cutoff,)):
+            why = same_place(me, r)
+            if why:
+                return f"{r['resolved_place'] or r['wiki_page']}: {why}"
+        return ""
 
     def videos_for_place_backfill(self) -> list[dict]:
         """Every video with the fields needed to fill in its resolved place."""

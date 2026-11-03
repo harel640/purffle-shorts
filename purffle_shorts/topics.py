@@ -29,7 +29,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 from .config import Settings
-from .history import PLACE_REUSE_DAYS, History, place_recently_used
+from .history import History
 from .utils import http, raise_for_status
 
 log = logging.getLogger("purffle")
@@ -51,6 +51,41 @@ class Topic:
     keywords: list[str] = field(default_factory=list)  # real YouTube searches handed to the script writer
     source_url: str = ""     # the grounding article's URL (shown in the description, saved in metadata)
     source_text: str = ""    # the grounding article's plain text (facts must come from here, not be invented)
+    # A place from a ranked list: its exact Wikipedia article and coordinates (looked up, never searched for).
+    wiki_title: str = ""
+    place: str = ""
+    country: str = ""
+    lat: float | None = None
+    lon: float | None = None
+
+
+def article_page(title: str, lang: str = "en", max_chars: int = 5000) -> dict | None:
+    """The Wikipedia article with exactly this ``title`` (redirects followed, never a search - so "Ban Rak
+    Thai" can't turn into a different article): {title, url, text, lat, lon}, or None if it doesn't exist."""
+    try:
+        r = http().get(f"https://{lang}.wikipedia.org/w/api.php", timeout=20, params={
+            "action": "query", "format": "json", "formatversion": 2, "redirects": 1, "titles": title,
+            "prop": "extracts|coordinates", "explaintext": 1, "exsectionformat": "plain",
+            "colimit": 1, "coprimary": "all"})
+        raise_for_status(r, "Wikipedia article")
+        pages = (r.json().get("query") or {}).get("pages") or []
+        page = pages[0] if pages else None
+        if not page or page.get("missing") or not page.get("extract"):
+            return None
+        co = (page.get("coordinates") or [{}])[0]
+        name = page.get("title", title)
+        return {"title": name, "url": f"https://{lang}.wikipedia.org/wiki/{name.replace(' ', '_')}",
+                "text": re.sub(r"\n{3,}", "\n\n", str(page["extract"]).strip())[:max_chars],
+                "lat": co.get("lat"), "lon": co.get("lon")}
+    except Exception as e:
+        log.warning("Wikipedia article %r failed: %s", title, e)
+        return None
+
+
+def wiki_page_title(url: str) -> str:
+    """'https://en.wikipedia.org/wiki/Shey_Gompa' -> 'Shey Gompa' (the article a video was grounded in)."""
+    from urllib.parse import unquote
+    return unquote(url.rsplit("/wiki/", 1)[1]).replace("_", " ") if "/wiki/" in (url or "") else ""
 
 
 def article(query: str, lang: str = "en", max_chars: int = 5000) -> tuple[str, str]:
@@ -261,7 +296,9 @@ def from_list(settings: Settings, history: History) -> Topic | None:
     JSON {"generated": "<ISO date>", "places": [{"place", "region", "country"}, ...]} in rank order.
 
     An entry is claimed when picked, so a place that later gets skipped doesn't block the list; places made
-    within PLACE_REUSE_DAYS are passed over. Returns None — and the normal topic sources take over — when no
+    within PLACE_REUSE_DAYS are passed over (same Wikipedia page or coordinates, not just a similar name).
+    The entry's ``wikipedia_title``/``lat``/``lon`` ride along on the Topic, so it is grounded in exactly that
+    article. Returns None — and the normal topic sources take over — when no
     list is configured, the file is missing or unreadable, older than TOPIC_LIST_MAX_AGE_DAYS, or used up."""
     if not settings.topic_list_file:
         return None
@@ -282,7 +319,6 @@ def from_list(settings: Settings, history: History) -> Topic | None:
         log.warning("Topic list %s is stale (%d days old, max %d); using the normal topic sources",
                     p, age, settings.topic_list_max_age_days)
         return None
-    recent = history.recent_places(PLACE_REUSE_DAYS)
     stamp = generated.date().isoformat()
     for e in data.get("places") or []:
         if not isinstance(e, dict):
@@ -291,12 +327,17 @@ def from_list(settings: Settings, history: History) -> Topic | None:
         if not place:
             continue
         key = f"list:{stamp}:{place}|{country}".lower()
-        if history.topic_used(key) or place_recently_used(place, country, recent):
+        lat, lon = e.get("lat"), e.get("lon")
+        if history.topic_used(key) or history.place_recently_made(
+                wiki_page=str(e.get("wikipedia_title") or ""), lat=lat if isinstance(lat, (int, float)) else None,
+                lon=lon if isinstance(lon, (int, float)) else None, place=place, country=country):
             continue
         history.mark_topic(key)    # claimed now: if this video is skipped, the next run takes the next place
         subject = list_subject(place, region, country)
         log.info("Topic list: #%s %s", e.get("rank", "?"), subject)
-        return Topic(subject, "list", key=key)
+        return Topic(subject, "list", key=key, wiki_title=str(e.get("wikipedia_title") or ""), place=place,
+                     country=country, lat=lat if isinstance(lat, (int, float)) else None,
+                     lon=lon if isinstance(lon, (int, float)) else None)
     log.info("Every place in topic list %s is used; using the normal topic sources", p)
     return None
 

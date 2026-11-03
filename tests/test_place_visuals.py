@@ -172,17 +172,29 @@ def test_place_scenes_hybrid_routes_historical_to_ai(settings, monkeypatch, tmp_
     pool = [_wiki_item(i, f"Mrauk U temple {i}") for i in range(6)]
     v = _visuals(settings, monkeypatch, pool)
 
-    def fake_ai(prompt, dest_dir, idx, arch=""):
+    def fake_ai(prompt, dest_dir, idx, arch="", clothing=""):
         v.ai_used = True
+        v.ai_look = (arch, clothing)
         return MediaItem("pollinations", f"ai{idx}", "image", path=dest_dir / f"ai{idx}.jpg",
                          width=1080, height=1920, query=prompt)
 
     monkeypatch.setattr(v, "_historical_image", fake_ai)
     jobs = [("Mrauk U skyline today", "", False), ("a king's court long ago", "royal court", True)]
-    out = v.for_place_scenes(jobs, "Mrauk U", "Myanmar", tmp_path / "m", min_images=5)
+    out = v.for_place_scenes(jobs, "Mrauk U", "Myanmar", tmp_path / "m", min_images=5,
+                             article="Mrauk U was the Arakanese capital; its temples are bell-shaped stone zedi.")
     assert out[0].source == "wikimedia" and out[1].source == "pollinations"   # today -> photo, past -> AI
-    assert v.ai_used is True
+    assert v.ai_used is True and "stupas" in v.ai_look[0] and "longyi" in v.ai_look[1]   # look from the article
     assert len(v.image_credits) == 1 and v.image_credits[0]["author"].startswith("Author")  # AI isn't credited
+
+
+def test_place_scenes_without_a_look_from_the_article_use_photos_not_ai(settings, monkeypatch, tmp_path):
+    settings.ai_scene_source = "pollinations"
+    pool = [_wiki_item(i, f"Pyay town {i}") for i in range(6)]
+    v = _visuals(settings, monkeypatch, pool)
+    monkeypatch.setattr(v, "_historical_image", lambda *a, **k: pytest.fail("no look -> must not draw"))
+    out = v.for_place_scenes([("a king long ago", "royal court", True)], "Pyay", "Myanmar",
+                             tmp_path / "m", min_images=5, article="Pyay is a town in Myanmar.")   # no style named
+    assert out[0].source == "wikimedia"
 
 
 def test_place_scenes_falls_back_to_photo_when_ai_fails(settings, monkeypatch, tmp_path):
@@ -217,13 +229,12 @@ def test_place_scenes_never_repeats_an_image(settings, monkeypatch, tmp_path):
     assert len(set(keys)) == len(keys) == 4   # each scene gets a distinct image, none reused
 
 
-def test_architecture_hint_depends_on_place():
-    india = M._architecture_hint("Hampi", "India").lower()
-    assert "gopuram" in india and "no " not in india            # names the real style POSITIVELY, no negatives
-    assert "khmer" in M._architecture_hint("Angkor Wat", "Cambodia").lower()
-    assert "burmese" in M._architecture_hint("Bagan", "Myanmar").lower()
-    neutral = M._architecture_hint("Some Place", "Narnia").lower()   # unknown -> neutral, positive cue
-    assert "gopuram" not in neutral and "no " not in neutral and "traditional" in neutral
+def test_look_depends_on_the_article_not_the_country():
+    hampi = M.look_from_text("Hampi", "Hampi was the capital of the Vijayanagara Empire; its gopuram towers")
+    assert "gopuram" in hampi["architecture"].lower() and "no " not in hampi["architecture"].lower()
+    assert "khmer" in M.look_from_text("Koh Ker", "a Khmer temple city of prasat towers")["architecture"].lower()
+    assert "burmese" in M.look_from_text("Bagan", "Bagan, capital of the Pagan Kingdom")["architecture"].lower()
+    assert M.look_from_text("Some Place", "") == {}              # unknown -> no look (and so no AI image)
 
 
 def test_historical_image_fills_frame_and_leads_with_architecture(settings, monkeypatch, tmp_path):
