@@ -100,6 +100,8 @@ class Settings:
     niches: list[str] = field(default_factory=lambda: list(DEFAULT_NICHES))
     topic_sources: list[str] = field(default_factory=lambda: ["niche"])  # niche,search,trending,wikipedia,reddit,file
     topics_file: str = "topics.txt"
+    topic_list_file: str = ""         # ranked JSON topic list picked from first (e.g. a weekly scout's output)
+    topic_list_max_age_days: int = 10  # an older list is stale and ignored
     trends_geo: str = "US"
     style: str = "auto"               # auto|facts|story|listicle|myth|quiz|motivational|news|explainer|dialogue|chat
     language: str = "en"
@@ -302,6 +304,8 @@ class Settings:
             niches=_list(_env("NICHES")) or list(DEFAULT_NICHES),
             topic_sources=_list(_env("TOPIC_SOURCES", "niche")) or ["niche"],
             topics_file=_env("TOPICS_FILE", d.topics_file),
+            topic_list_file=_env("TOPIC_LIST_FILE", d.topic_list_file),
+            topic_list_max_age_days=_int("TOPIC_LIST_MAX_AGE_DAYS", d.topic_list_max_age_days),
             trends_geo=_env("TRENDS_GEO", d.trends_geo),
             style=_env("SCRIPT_STYLE", d.style).lower(),
             language=_env("LANGUAGE", d.language).lower(),

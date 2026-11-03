@@ -5,12 +5,35 @@ planner, and view counts for the videos that are live."""
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+PLACE_REUSE_DAYS = 90    # don't let the autopilot pick a place already made within this many days
+
+# Generic words stripped when comparing place names, so "Hampi", "Hampi, India" and "Vittala Temple, Hampi"
+# all reduce to the same distinctive token ("hampi").
+_PLACE_GENERIC = {"temple", "temples", "city", "town", "fort", "ruins", "ruin", "old", "ancient", "great",
+                  "palace", "site", "complex", "valley", "river", "lake", "mount", "hill", "cave", "caves",
+                  "monastery", "stupa", "pagoda", "the", "of", "and", "at", "national", "park"}
+
+
+def _place_tokens(text: str, extra_stop: frozenset[str] = frozenset()) -> set[str]:
+    stop = _PLACE_GENERIC | extra_stop
+    return {t for t in re.findall(r"[a-z]+", (text or "").lower()) if len(t) > 2 and t not in stop}
+
+
+def place_recently_used(place: str, country: str, recent_places: list[str]) -> bool:
+    """True when ``place`` shares a distinctive name token with any recently-made place, so a place is matched
+    by what it resolves to rather than by the exact title (e.g. 'Hampi' == 'Vittala Temple, Hampi')."""
+    key = _place_tokens(place, frozenset(re.findall(r"[a-z]+", (country or "").lower())))
+    if not key:
+        return False
+    return any(key & _place_tokens(rp) for rp in recent_places)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS videos (

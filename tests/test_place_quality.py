@@ -78,6 +78,25 @@ def test_geosearch_images_sends_coords_and_filters_license(monkeypatch):
     assert seen["generator"] == "geosearch" and seen["ggscoord"] == "32.0|77.3" and seen["ggsradius"] == 5000
 
 
+def test_commons_busy_error_body_is_retried_not_read_as_no_images(monkeypatch):
+    # Commons answers 200 {"error": {"info": "Search is currently too busy"}} when overloaded. That used to
+    # come back as 0 photos, so a well-photographed place was skipped for "too few images".
+    import purffle_shorts.utils as U
+    monkeypatch.setattr(U.time, "sleep", lambda s: None)
+    busy = _R({"error": {"code": "search-error", "info": "Search is currently too busy. Please try again later."}})
+    replies = [busy, _R({"query": {"pages": [_cpage(1, "File:Pulga village.jpg")]}})]
+
+    class _Sess:
+        def get(self, url, params=None, headers=None, timeout=None):
+            return replies.pop(0)
+
+    monkeypatch.setattr(M, "http", lambda: _Sess())
+    assert [i.id for i in M.geosearch_images(32.0, 77.3)] == ["1"]          # retried, then found
+    replies[:] = [busy] * 3
+    with pytest.raises(RuntimeError, match="too busy"):                       # still busy: an error, not []
+        M.geosearch_images(32.0, 77.3)
+
+
 def _wimg(key_id, text, w=1600, h=1200):
     return MediaItem("wikimedia", key_id, "image", url=f"https://c/{key_id}.jpg", width=w, height=h,
                      author=f"Author {key_id}", license="CC BY-SA 4.0", license_url="https://cc/by-sa",

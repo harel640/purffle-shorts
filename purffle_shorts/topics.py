@@ -6,6 +6,8 @@ TOPIC_SOURCES=niche:4,trending:1,wikipedia:1
   wikipedia  "On this day" historical events
   reddit     r/todayilearned top posts of the day
   file       your own list: one topic per line in topics.txt (each used once)
+  list       a ranked JSON list of places (TOPIC_LIST_FILE), e.g. written weekly by a scout tool; when
+             set it is picked from first, and skipped when missing, stale or used up
   rss        the newest unused item from your RSS_FEEDS (blogs, news sites, podcasts)
   search     questions people type into YouTube's search box about one of your NICHES
 
@@ -16,17 +18,18 @@ A single video can also be made from a web page (--url) or a local text/markdown
 from __future__ import annotations
 
 import html
+import json
 import logging
 import random
 import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 
 from .config import Settings
-from .history import History
+from .history import PLACE_REUSE_DAYS, History, place_recently_used
 from .utils import http, raise_for_status
 
 log = logging.getLogger("purffle")
@@ -79,7 +82,7 @@ def place_coordinates(query: str, lang: str = "en") -> tuple[float, float] | Non
         r = http().get(f"https://{lang}.wikipedia.org/w/api.php", timeout=20, params={
             "action": "query", "format": "json", "redirects": 1,
             "generator": "search", "gsrsearch": query, "gsrlimit": 1, "gsrnamespace": 0,
-            "prop": "coordinates", "colimit": 1})
+            "prop": "coordinates", "colimit": 1, "coprimary": "all"})   # some articles tag theirs non-primary
         raise_for_status(r, "Wikipedia coordinates")
         pages = (r.json().get("query") or {}).get("pages") or {}
         page = next(iter(pages.values()), None) if isinstance(pages, dict) else (pages[0] if pages else None)
@@ -144,6 +147,18 @@ def has_real_history(article: str) -> bool:
     return any(int(c) <= 19 for c in _OLD_CENTURY_RE.findall(article))
 
 
+def history_depth(article: str) -> int:
+    """How much real pre-1900 history the text records: the number of DISTINCT markers — BCE dates, early
+    centuries, dated pre-1900 events and historical eras. 0 means has_real_history() is False."""
+    if not article:
+        return 0
+    marks = {m.group(0).lower().replace(".", "") for m in _BCE_RE.finditer(article)}
+    marks |= {m.lower() for m in _OLD_ERA_RE.findall(article)}
+    marks |= {f"y{y}" for y in _OLD_DATE_RE.findall(article) if int(y) < 1900}
+    marks |= {f"c{c}" for c in _OLD_CENTURY_RE.findall(article) if int(c) <= 19}
+    return len(marks)
+
+
 def _weighted_sources(settings: Settings) -> list[tuple[str, float]]:
     out = []
     for item in settings.topic_sources or ["niche"]:
@@ -173,6 +188,61 @@ def from_file(settings: Settings, history: History) -> Topic | None:
         if not history.topic_used(key):
             return Topic(line, "file", key=key)
     log.info("All topics in %s have been used", p)
+    return None
+
+
+def list_subject(place: str, region: str = "", country: str = "") -> str:
+    """The topic subject for a listed place — "Place, Region, Country" — leaving out any part the name
+    already contains (e.g. "Gokarna, Karnataka, India"; "Singapore Botanic Gardens, Singapore")."""
+    parts = [place.strip()]
+    for x in (region.strip(), country.strip()):
+        if x and x.lower() not in " ".join(parts).lower():
+            parts.append(x)
+    return ", ".join(p for p in parts if p)
+
+
+def from_list(settings: Settings, history: History) -> Topic | None:
+    """The next place from an external ranked list (TOPIC_LIST_FILE, e.g. written weekly by a scout tool):
+    JSON {"generated": "<ISO date>", "places": [{"place", "region", "country"}, ...]} in rank order.
+
+    An entry is claimed when picked, so a place that later gets skipped doesn't block the list; places made
+    within PLACE_REUSE_DAYS are passed over. Returns None — and the normal topic sources take over — when no
+    list is configured, the file is missing or unreadable, older than TOPIC_LIST_MAX_AGE_DAYS, or used up."""
+    if not settings.topic_list_file:
+        return None
+    p = Path(settings.topic_list_file)
+    if not p.exists():
+        log.info("Topic list %s not found; using the normal topic sources", p)
+        return None
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        generated = datetime.fromisoformat(str(data.get("generated") or "").replace("Z", "+00:00"))
+    except (OSError, ValueError, AttributeError) as e:
+        log.warning("Topic list %s is unreadable (%s); using the normal topic sources", p, e)
+        return None
+    if generated.tzinfo is None:
+        generated = generated.replace(tzinfo=timezone.utc)
+    age = (datetime.now(timezone.utc) - generated).days
+    if age > settings.topic_list_max_age_days:
+        log.warning("Topic list %s is stale (%d days old, max %d); using the normal topic sources",
+                    p, age, settings.topic_list_max_age_days)
+        return None
+    recent = history.recent_places(PLACE_REUSE_DAYS)
+    stamp = generated.date().isoformat()
+    for e in data.get("places") or []:
+        if not isinstance(e, dict):
+            continue
+        place, region, country = (str(e.get(k) or "").strip() for k in ("place", "region", "country"))
+        if not place:
+            continue
+        key = f"list:{stamp}:{place}|{country}".lower()
+        if history.topic_used(key) or place_recently_used(place, country, recent):
+            continue
+        history.mark_topic(key)    # claimed now: if this video is skipped, the next run takes the next place
+        subject = list_subject(place, region, country)
+        log.info("Topic list: #%s %s", e.get("rank", "?"), subject)
+        return Topic(subject, "list", key=key)
+    log.info("Every place in topic list %s is used; using the normal topic sources", p)
     return None
 
 
@@ -404,10 +474,18 @@ def pick_topic(settings: Settings, history: History, explicit: str | None = None
         if source == "queue":
             log.info("The idea queue is empty; using a niche topic")
             return from_niche(settings)
+    if source is None:
+        try:
+            listed = from_list(settings, history)   # a ranked topic list, when configured, comes next
+        except Exception as e:
+            log.warning("Topic list failed (%s); using the normal topic sources", e)
+            listed = None
+        if listed:
+            return listed
     choices = [(source, 1.0)] if source else _weighted_sources(settings)
     names, weights = zip(*choices)
     name = random.choices(names, weights=weights, k=1)[0] if sum(weights) > 0 else "niche"
-    fetch = {"file": from_file, "trending": from_trends, "wikipedia": from_wikipedia, "reddit": from_reddit,
+    fetch = {"file": from_file, "list": from_list, "trending": from_trends, "wikipedia": from_wikipedia, "reddit": from_reddit,
              "rss": from_rss, "search": from_search}
     if name in fetch:
         try:
