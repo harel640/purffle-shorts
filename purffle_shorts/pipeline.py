@@ -254,6 +254,28 @@ def grounding_article(pick: Topic, lang: str = "en") -> tuple[str, str]:
     return page["text"], page["url"]
 
 
+EXPLICIT_SOURCES = ("manual", "script", "clip", "url", "document")   # the user chose the topic: never blocked
+
+
+def resolved_place_reason(pick: Topic, place: str, country: str, lang: str = "en") -> str:
+    """Why the place a script resolved to is a modern attraction (a zoo, resort, mall, a glass bridge ... or
+    opened after 1950), or "". The topic name and article are vetted when the topic is picked, but the script
+    can wander to something else (a listed park's story may centre on a specific bridge or lodge), so the place
+    it resolved to gets the same rules: by its name, and - when its own Wikipedia article can be found and is
+    about that place - by what the article says. A place the user asked for explicitly is never blocked."""
+    if pick.source in EXPLICIT_SOURCES or not place:
+        return ""
+    name = ", ".join(x for x in (place, country) if x)
+    reason = topics.modern_attraction_reason(name, "")
+    if reason or place_recently_used(place, country, [pick.place or pick.subject]):
+        return reason                      # by name; or it is the topic's own place, whose article was vetted
+    text, url = topics.article(name, lang)
+    title = topics.wiki_page_title(url)
+    if text and title and place_recently_used(place, country, [title]):     # the article really is this place
+        reason = topics.modern_attraction_reason(name, text[:5000])
+    return reason
+
+
 def image_credits_block(creds: list[dict]) -> str:
     """Attribution block for Wikimedia images, as CC-BY / CC-BY-SA require (author + license + links)."""
     seen: set[str] = set()
@@ -598,7 +620,7 @@ class Studio:
                 # Don't let the autopilot repeat a place made recently: the same Wikipedia page or coordinates
                 # (two names for one place), not a shared word. A user who explicitly asks for a topic (source
                 # "manual"/url/document) is never blocked.
-                if pick.source not in ("manual", "script", "clip", "url", "document"):
+                if pick.source not in EXPLICIT_SOURCES:
                     why = self.history.place_recently_made(
                         wiki_page=wiki_page, lat=coords[0] if coords else None, lon=coords[1] if coords else None,
                         place=place, country=country, days=PLACE_REUSE_DAYS)
@@ -611,6 +633,10 @@ class Studio:
             hit = safety.sensitive_region(place, country)
             if hit:
                 raise SkipTopic(f"sensitive region ({hit}) — skipped by policy")
+            if place_locked:
+                why = resolved_place_reason(pick, place, country, s.language.split("-")[0])
+                if why:
+                    raise SkipTopic(f"not a hidden natural/historic place: {why} (the video resolved to {place})")
             self._step("voice", f"{s.tts_engine} voice")
             speech = self._speak(script, work, s)
             total = round(speech.duration + END_PAD, 3)

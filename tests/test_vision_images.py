@@ -204,3 +204,81 @@ def test_a_video_is_skipped_only_when_no_image_could_be_verified(monkeypatch, tm
     with pytest.raises(M.SkipTopic, match="vision unavailable"):
         v2.for_place_scenes([("Horton Plains", "", False)] * 3, "Horton Plains", "Sri Lanka", tmp_path / "m2",
                             min_images=3, lat=6.8, lon=80.8)
+
+
+# ------------------------------------------------------------------ last resort: never an unverified photo
+class _BySubject:
+    """Vision double deciding by the subject asked about: ``shows(subject) -> True/False/None``."""
+    def __init__(self, shows):
+        self.shows, self.asked = shows, []
+
+    def image_shows(self, path, subject):
+        self.asked.append(subject)
+        return self.shows(subject)
+
+
+TIBETAN = "Tabo is a Tibetan Buddhist monastery in Spiti, founded in 996 CE."
+
+
+def _place_visuals(monkeypatch, shows, n=8):
+    v = Visuals(Settings(visual_sources=["wikimedia"], ai_scene_source="pollinations"), llm=_BySubject(shows))
+    pool = _pool(monkeypatch, v, n)
+    monkeypatch.setattr(M, "geosearch_images", lambda *a, **k: list(pool))
+    monkeypatch.setattr(v, "_wiki_search", lambda q: [])
+    return v
+
+
+def test_the_last_resort_picker_returns_only_verified_photos(monkeypatch, tmp_path):
+    v = Visuals(Settings(), llm=_BySubject(lambda s: None))              # nothing is ever verified
+    pool = _pool(monkeypatch, v)
+    got = v._reuse_place_image(pool, "plain", M._terms("Horton Plains"), set(), tmp_path, 0, exclude=None,
+                               subject="a plain")
+    assert got is None                                                   # used to return an unchecked photo
+    v2 = Visuals(Settings(), llm=_BySubject(lambda s: True))
+    got = v2._reuse_place_image(_pool(monkeypatch, v2), "plain", M._terms("Horton Plains"), set(), tmp_path, 0,
+                                exclude=None, subject="a plain")
+    assert got is not None
+
+
+def test_last_resort_still_works_when_no_check_is_expected(monkeypatch, tmp_path):
+    v = Visuals(Settings(), llm=None)                                    # offline / vision off: as before
+    got = v._reuse_place_image(_pool(monkeypatch, v), "plain", M._terms("Horton Plains"), set(), tmp_path, 0,
+                               exclude=None, subject="a plain")
+    assert got is not None
+
+
+def test_pool_out_of_verified_photos_skips_the_topic(monkeypatch, tmp_path):
+    v = _place_visuals(monkeypatch, lambda s: False)                     # every photo "doesn't show it"
+    with pytest.raises(M.SkipTopic, match="no vision-verified photo"):
+        v.for_place_scenes([("Horton Plains", "", False)] * 3, "Horton Plains", "Sri Lanka", tmp_path / "m",
+                           min_images=3, lat=6.8, lon=80.8, article="Horton Plains is a plateau.")
+
+
+def test_a_middle_scene_out_of_photos_becomes_an_ai_scene_when_allowed(monkeypatch, tmp_path):
+    # Opener/closer pass; the middle scene's subject is never shown by any photo.
+    v = _place_visuals(monkeypatch, lambda s: s != "worship hall interior")
+    made = {}
+
+    def fake_ai(prompt, dest_dir, idx, arch="", clothing=""):
+        made[idx] = (arch, clothing)
+        return MediaItem("cloudflare", f"ai{idx}", "image", path=dest_dir / f"ai{idx}.jpg", width=1080,
+                         height=1920, query=prompt)
+
+    monkeypatch.setattr(v, "_historical_image", fake_ai)
+    jobs = [("Tabo Monastery", "", False), ("worship hall interior", "a hall of monks", False),
+            ("Tabo frescoes", "monks painting", True), ("Tabo Monastery", "", False)]
+    out = v.for_place_scenes(jobs, "Tabo Monastery", "India", tmp_path / "m", min_images=3, lat=32.2, lon=78.0,
+                             article=TIBETAN, title="Tabo Monastery")
+    assert [m.source for m in out] == ["wikimedia", "cloudflare", "cloudflare", "wikimedia"]
+    assert "Tibetan" in made[1][0] and "maroon" in made[1][1]            # drawn in the place's own look
+
+
+def test_no_ai_for_the_opener_the_closer_or_a_place_format_video(monkeypatch, tmp_path):
+    v = _place_visuals(monkeypatch, lambda s: False)                     # nothing verifies; AI would be possible
+    monkeypatch.setattr(v, "_historical_image", lambda *a, **k: pytest.fail("AI must not stand in here"))
+    cases = [([("Tabo", "", False), ("Tabo", "", True)], TIBETAN),                # opener has no photo
+             ([("Tabo", "", False)] * 3, "Tabo is a village.")]                    # no look -> no AI
+    for jobs, article in cases:
+        with pytest.raises(M.SkipTopic, match="no vision-verified photo"):
+            v.for_place_scenes(jobs, "Tabo", "India", tmp_path / "m", min_images=3, lat=32.2, lon=78.0,
+                               article=article)

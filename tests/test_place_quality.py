@@ -74,7 +74,9 @@ def test_modern_attraction_rule_ignores_facilities_restorations_designations(sub
     ("Siam Paragon, Thailand", "Siam Paragon is a shopping mall in Bangkok.", "shopping mall"),
     # Its own opening counts, even when other words in the sentence are "facilities" or the region is historic.
     ("Zhangjiajie Glass Bridge, China", "Zhangjiajie Glass Bridge is a skywalk bridge above Wulingyuan, a region "
-     "settled since the Ming dynasty. The bridge, opened to the public on 20 August 2016, is 430 m long.", "2016"),
+     "settled since the Ming dynasty. The bridge, opened to the public on 20 August 2016, is 430 m long.", "glass bridge"),
+    ("Zhangjiajie Footbridge, China", "Zhangjiajie Footbridge is a footbridge above Wulingyuan, a region settled "
+     "since the Ming dynasty. The bridge, opened to the public on 20 August 2016, is 430 m long.", "2016"),
     ("Heritage Museum, Malaysia", "The Heritage Museum is a museum of the region's 15th-century sultanate. The "
      "museum opened in 2005.", "2005"),
 ])
