@@ -18,6 +18,7 @@ from urllib.parse import quote
 from . import safety
 from .config import Settings
 from .history import distance_km
+from .llm import ImageUnusable
 from .utils import PermanentError, download, http, raise_for_status, redact, with_retries
 
 log = logging.getLogger("purffle")
@@ -53,6 +54,11 @@ class NeuronBudget:
 VIDEO_EXT = {".mp4", ".mov", ".m4v", ".webm", ".mkv"}
 IMAGE_EXT = {".jpg", ".jpeg", ".png", ".webp"}
 STOP_WORDS = {"the", "a", "an", "of", "and", "in", "on", "with", "for", "to", "at", "by", "from", "closeup"}
+
+
+NO_ANSWER = "no-answer"      # verify_subject: a vision check was expected but no backend answered for this image
+VISION_GIVE_UP_FRESH = 3     # consecutive images with no answer, none ever answered  -> vision is down
+VISION_GIVE_UP_STREAK = 6    # consecutive images with no answer, even after some answered -> it went down
 
 
 class SkipTopic(Exception):
@@ -722,6 +728,8 @@ class Visuals:
         self.budget = budget                          # Cloudflare neuron budget for AI image gen (may be None)
         self._vision_cache: dict[tuple[str, str], bool | None] = {}
         self._vision_unavailable = False              # set when the check is configured but no model answered
+        self._vision_answered = 0                     # images a backend gave a yes/no for
+        self._vision_streak = 0                       # consecutive images no backend answered for
         self._look_cache: dict = {}                   # (place, country, article) -> {architecture, clothing}
         self.used = set(used_keys or ())
         self.lock = threading.Lock()
@@ -868,35 +876,45 @@ class Visuals:
             self._look_cache[key] = look
         return self._look_cache[key]
 
-    def verify_subject(self, item: MediaItem, subject: str) -> bool | None:
+    def verify_subject(self, item: MediaItem, subject: str):
         """Ask the vision model whether the downloaded image actually shows ``subject`` (Commons titles lie).
-        Cached per (image, subject). Only an explicit "yes" (True) is a pass; a "no" (False) rejects the image;
-        and a None/empty answer means the check could not be made — treated as UNAVAILABLE (fail closed), never
-        as a pass. Returns None only when the check is not expected (disabled, offline, or no image)."""
+        Cached per (image, subject). Returns True (shows it), False (doesn't - or the image itself can't be
+        read by a vision model: skip it), NO_ANSWER (a check was expected but no backend answered for this
+        image: don't use it unverified, try another), or None when no check is expected (disabled, offline,
+        or no image). Only an explicit "yes" is a pass. One image failing is not an outage: vision counts as
+        UNAVAILABLE (and the video is skipped, fail closed) only when no backend has answered for the first
+        VISION_GIVE_UP_FRESH images, or for VISION_GIVE_UP_STREAK images in a row."""
         if not subject or not getattr(self.s, "vision_check", True) or self.llm is None or not item.path:
             return None                                       # check not expected -> accept via ranking
         ck = (item.key, subject.lower())
         if ck in self._vision_cache:
             cached = self._vision_cache[ck]
-            if cached is None:                                # a cached 'unavailable' still fails the video closed
-                self._vision_unavailable = True
-            return cached
+            return NO_ANSWER if cached is None else cached
         try:
             verdict = self.llm.image_shows(item.path, subject)
+        except ImageUnusable as e:                            # THIS image can't be checked: skip it, not an outage
+            log.info("Vision: skipping %s - %s", item.extra.get("wiki_title") or item.key, redact(e))
+            self._vision_cache[ck] = False
+            return False
         except Exception as e:
             log.debug("vision check errored (%s)", redact(e))
             verdict = None
-        if verdict is True:                                   # only an explicit "yes" is a pass
-            self._vision_cache[ck] = True
-            return True
-        if verdict is False:
-            log.info("Vision: %s does not show %r — rejected", item.extra.get("wiki_title") or item.key, subject)
-            self._vision_cache[ck] = False
-            return False
-        # None, empty, or any non-boolean answer: the check could not be made -> UNAVAILABLE (fail closed).
+        if verdict is True or verdict is False:               # only an explicit yes/no counts as an answer
+            self._vision_cache[ck] = verdict
+            self._vision_answered += 1
+            self._vision_streak = 0
+            if verdict is False:
+                log.info("Vision: %s does not show %r — rejected", item.extra.get("wiki_title") or item.key,
+                         subject)
+            return verdict
+        # None, empty, or any non-boolean answer: no backend answered for this image.
         self._vision_cache[ck] = None
-        self._vision_unavailable = True
-        return None
+        self._vision_streak += 1
+        log.info("Vision: no backend answered for %s (%d in a row, %d answered so far)",
+                 item.extra.get("wiki_title") or item.key, self._vision_streak, self._vision_answered)
+        if (self._vision_answered == 0 and self._vision_streak >= VISION_GIVE_UP_FRESH)                 or self._vision_streak >= VISION_GIVE_UP_STREAK:
+            self._vision_unavailable = True
+        return NO_ANSWER
 
     def _claim_wiki(self, cands: list[MediaItem], query: str, script_terms: set[str],
                     avoid: set[str] | None = None) -> MediaItem | None:
@@ -968,8 +986,10 @@ class Visuals:
                 log.info("Scene %d: skipping near-blank/low-contrast image %s", idx + 1, item.key)
                 continue
             verdict = self.verify_subject(item, subject)
-            if verdict is False:
-                continue                                         # the pixels don't show the subject -> next
+            if verdict is False or verdict == NO_ANSWER:
+                if self._vision_unavailable:
+                    return None                                  # vision is down: the scene check raises SkipTopic
+                continue                                         # not the subject, or unverified -> next candidate
             if verdict is None and landmark and _ANIMAL_PEOPLE_RE.search(item.text):
                 continue                                         # no vision: don't risk an animal/person on a landmark
             return item
@@ -1115,7 +1135,10 @@ class Visuals:
                 continue
             if _low_quality_image(item.path):
                 continue
-            if self.verify_subject(item, subject) is False:    # the pixels don't show the landmark -> next
+            verdict = self.verify_subject(item, subject)
+            if verdict is False or verdict == NO_ANSWER:       # not the landmark, or unverified -> next
+                if self._vision_unavailable:
+                    return None
                 continue
             return item
         return None
