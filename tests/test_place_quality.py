@@ -381,11 +381,20 @@ class _FakeVisionLLM:
         return self.verdicts.get(str(path), self.verdicts.get("*"))
 
 
+def _real_jpeg(path, fmt="JPEG", size=(64, 48)):
+    from PIL import Image
+    im = Image.new("RGB", size, (120, 90, 60))
+    if fmt == "MPO":                                   # a two-frame multi-picture file, as many cameras write
+        im.save(path, format="MPO", save_all=True, append_images=[Image.new("RGB", size, (10, 10, 10))])
+    else:
+        im.save(path, format=fmt)
+    return path
+
+
 def test_image_shows_parses_yes_no(monkeypatch, tmp_path):
     from purffle_shorts.llm import LLM
     monkeypatch.setenv("GEMINI_API_KEY", "k")
-    img = tmp_path / "x.jpg"
-    img.write_bytes(b"\xff\xd8\xff\xe0 jpeg bytes")
+    img = _real_jpeg(tmp_path / "x.jpg")
     answers = iter(["Yes.", "no", "maybe"])
 
     class _Resp:
@@ -409,8 +418,7 @@ def test_image_shows_falls_back_to_cloudflare_when_gemini_absent(monkeypatch, tm
     from purffle_shorts.llm import LLM
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
-    img = tmp_path / "x.jpg"
-    img.write_bytes(b"\x89PNG bytes")
+    img = _real_jpeg(tmp_path / "x.jpg")
 
     class _Resp:
         status_code = 200
@@ -508,10 +516,10 @@ def test_verify_subject_none_is_unavailable_only_yes_is_a_pass():
         it.path = "k.jpg"                          # truthy so the check runs
         return Visuals(Settings(), llm=_L()), it
 
-    v, it = mk(None)
-    assert v.verify_subject(it, "a temple") is None and v._vision_unavailable is True   # blank -> unavailable
+    v, it = mk(None)                           # blank: never a pass; one image alone isn't an outage
+    assert v.verify_subject(it, "a temple") == M.NO_ANSWER and v._vision_unavailable is False
     v, it = mk("")
-    assert v.verify_subject(it, "a temple") is None and v._vision_unavailable is True   # empty -> unavailable
+    assert v.verify_subject(it, "a temple") == M.NO_ANSWER and v._vision_unavailable is False
     v, it = mk(True)
     assert v.verify_subject(it, "a temple") is True and v._vision_unavailable is False  # only yes passes
     v, it = mk(False)

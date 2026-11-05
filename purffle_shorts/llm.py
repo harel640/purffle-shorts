@@ -42,6 +42,38 @@ class LLMError(RuntimeError):
     pass
 
 
+class ImageUnusable(LLMError):
+    """The image itself can't be sent to a vision model (undecodable, or the backend says its format is
+    unsupported) - a problem with THIS image, not an outage: the caller skips it and tries another."""
+
+
+VISION_MAX_SIDE = 1024
+# A backend's HTTP 400 that is about the picture (not the key, quota or model).
+_IMAGE_ERROR_RE = re.compile(r"(?i)(unsupported[^.]{0,30}(image|format)|could not decode|corrupt|"
+                             r"invalid image|not a valid image|image format|cannot identify)")
+
+
+def vision_jpeg(image_path) -> bytes:
+    """``image_path`` as a plain baseline JPEG (RGB, long side <= VISION_MAX_SIDE) for a vision model.
+    Commons photos can be MPO (multi-picture) or have odd colour modes, which vision backends reject
+    ("Unsupported input image format 'MPO'"); this also shrinks a 3 MB photo to ~100 KB so the call is fast.
+    Raises ImageUnusable when the file can't be decoded."""
+    import io
+
+    try:
+        from PIL import Image, ImageOps
+        with Image.open(image_path) as im:
+            im = ImageOps.exif_transpose(im)
+            im.draft("RGB", (VISION_MAX_SIDE * 2, VISION_MAX_SIDE * 2))
+            im = im.convert("RGB")
+            im.thumbnail((VISION_MAX_SIDE, VISION_MAX_SIDE))
+            buf = io.BytesIO()
+            im.save(buf, "JPEG", quality=85)
+            return buf.getvalue()
+    except Exception as e:  # noqa: BLE001 - any decode failure means this image can't be used
+        raise ImageUnusable(f"cannot decode {image_path}: {e}") from e
+
+
 class LLMConfigError(LLMError):
     """Missing key, unknown provider, etc. — stop instead of retrying every video."""
 
@@ -475,17 +507,16 @@ class LLM:
     def image_shows(self, image_path, subject: str) -> bool | None:
         """Ask a free vision model whether ``image_path`` clearly shows ``subject``. Tries Gemini (its current
         model) then Cloudflare Workers AI (LLaVA, using the image-gen credentials already configured). Returns
-        True/False, or None when no vision model is reachable or the answer is unusable (caller falls back)."""
+        True/False, or None when no vision model answered (down, rate-limited, unusable reply). The picture is
+        re-encoded to a plain JPEG first. Raises ImageUnusable when the image itself is the problem (it can't
+        be decoded, or every backend that looked at it refused its format), so the caller can skip just that
+        image rather than treat vision as down."""
         import base64
-        import mimetypes
-        from pathlib import Path as _Path
 
-        try:
-            raw = _Path(image_path).read_bytes()
-        except OSError:
-            return None
-        mime = mimetypes.guess_type(str(image_path))[0] or "image/jpeg"
+        raw = vision_jpeg(image_path)                       # ImageUnusable propagates
+        mime = "image/jpeg"
         question = self._vision_question(subject)
+        image_error: Exception | None = None
 
         gem = self._gemini_vision_model()
         if gem:
@@ -505,6 +536,8 @@ class LLM:
                     return v
             except Exception as e:
                 log.debug("Gemini vision failed: %s", redact(e))
+                if isinstance(e, PermanentError) and _IMAGE_ERROR_RE.search(str(e)):
+                    image_error = e
 
         acct, tok = self.settings.cloudflare_account_id, self.settings.cloudflare_api_token
         if acct and tok:
@@ -518,6 +551,10 @@ class LLM:
                     return v
             except Exception as e:
                 log.debug("Cloudflare vision failed: %s", redact(e))
+                if isinstance(e, PermanentError) and _IMAGE_ERROR_RE.search(str(e)):
+                    image_error = e
+        if image_error is not None:
+            raise ImageUnusable(f"vision backend refused the image: {redact(image_error)}")
         return None
 
     def _reselect_on_model_gone(self, provider: Provider, error: Exception) -> Provider | None:
