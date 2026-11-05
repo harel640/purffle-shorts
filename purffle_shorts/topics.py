@@ -135,6 +135,7 @@ def place_coordinates(query: str, lang: str = "en") -> tuple[float, float] | Non
 # "hosts the Ulu Ulu Resort", "resort islands") is not one.
 _ATTRACTIONS = (r"zoos?|safari parks?|wildlife parks?|theme parks?|amusement parks?|water ?parks?|aqua ?parks?|"
                 r"fun ?fairs?|aquariums?|oceanariums?|marine parks?|bird parks?|dolphinariums?|"
+                r"glass[- ](?:bridges?|skywalks?|walkways?|footpaths?|platforms?)|skywalks?|"
                 r"shopping (?:malls?|centres?|centers?|complex(?:es)?)|outlet (?:malls?|villages?)|retail parks?|"
                 r"malls?|resorts?|hotels?|casinos?|golf courses?|holiday parks?|caravan parks?|"
                 r"stadiums?|convention (?:centres?|centers?)|observation (?:decks?|towers?|wheels?)|ferris wheels?")

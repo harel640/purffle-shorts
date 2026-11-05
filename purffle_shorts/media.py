@@ -56,6 +56,7 @@ IMAGE_EXT = {".jpg", ".jpeg", ".png", ".webp"}
 STOP_WORDS = {"the", "a", "an", "of", "and", "in", "on", "with", "for", "to", "at", "by", "from", "closeup"}
 
 
+AI_FALLBACK_SOURCES = {"pollinations", "cloudflare", "workers-ai", "flux", "openai-images", "gemini", "nano-banana"}
 NO_ANSWER = "no-answer"      # verify_subject: a vision check was expected but no backend answered for this image
 VISION_GIVE_UP_FRESH = 3     # consecutive images with no answer, none ever answered  -> vision is down
 VISION_GIVE_UP_STREAK = 6    # consecutive images with no answer, even after some answered -> it went down
@@ -730,6 +731,7 @@ class Visuals:
         self._vision_unavailable = False              # set when the check is configured but no model answered
         self._vision_answered = 0                     # images a backend gave a yes/no for
         self._vision_streak = 0                       # consecutive images no backend answered for
+        self._reuse_rejected: set[str] = set()        # pool photos the last-resort picker already turned down
         self._look_cache: dict = {}                   # (place, country, article) -> {architecture, clothing}
         self.used = set(used_keys or ())
         self.lock = threading.Lock()
@@ -1186,10 +1188,12 @@ class Visuals:
             if item is None:                                   # no fresh place image -> place-named stock video
                 item = self._place_stock_video(q, place, country, dest_dir, i)
             if item is None:                                   # last resort: an unused place photo (never a repeat)
-                item = self._reuse_place_image(pool, q, script_terms, chosen, dest_dir, i, exclude=None)
+                item = self._reuse_place_image(pool, q, script_terms, chosen, dest_dir, i, exclude=None,
+                                               subject=subject)
             # Never show the same image for more than two scenes in a row: swap in a different pool photo.
             if item is not None and item.key == prev_key and consec >= 2:
-                alt = self._reuse_place_image(pool, q, script_terms, chosen, dest_dir, i, exclude=item.key)
+                alt = self._reuse_place_image(pool, q, script_terms, chosen, dest_dir, i, exclude=item.key,
+                                              subject=subject)
                 if alt is not None:
                     item = alt
             if self._vision_unavailable:
@@ -1197,7 +1201,17 @@ class Visuals:
                 # could not confirm shows its subject. The launcher logs this as "SKIPPED vision unavailable".
                 raise SkipTopic("vision unavailable — cannot verify a real photo shows its subject")
             if item is None:
-                item = MediaItem("generated", f"gradient-{i}", "generated", query=q)
+                # The pool is out of photos that pass the vision check, and an unverified photo is never used.
+                # A middle scene may become an AI illustration when AI is allowed (a history-format video: its
+                # place's look is known; never the opener/closer, never past the AI cap or the real-photo
+                # floor); otherwise the topic is skipped rather than shown with a photo nobody confirmed.
+                n_ai = sum(1 for m in results if m.source in AI_FALLBACK_SOURCES)
+                cap = min(5, len(jobs) - (2 * len(jobs) + 4) // 5)
+                if arch and not is_landmark and n_ai < cap and not (historical and arch):   # (AI was tried above)
+                    item = self._historical_image(prompt or q, dest_dir, i, arch=arch, clothing=clothing)
+                if item is None:
+                    raise SkipTopic(f"no vision-verified photo left for scene {i + 1} of {place} "
+                                    f"(pool of {len(pool)} used up) - skipping rather than use an unverified one")
             consec = consec + 1 if item.key == prev_key else 1
             prev_key = item.key
             if item.source == "wikimedia":                     # remember its subject so later scenes differ
@@ -1210,24 +1224,39 @@ class Visuals:
         return results
 
     def _reuse_place_image(self, pool: list[MediaItem], query: str, script_terms: set[str], chosen: set[str],
-                           dest_dir: Path, idx: int, exclude: str | None) -> MediaItem | None:
-        """Pick a pool photo for this scene, preferring one not used yet and never ``exclude`` (the image shown
-        on the two previous scenes). Downloads it; returns None only if the pool is empty of alternatives."""
-        with self.lock:
-            cands = [c for c in pool if c.key != exclude]
-            unused = [c for c in cands if c.key not in self.used]
-            pick_from = unused or cands
-            if not pick_from:
-                return None
-            best = max(pick_from, key=lambda c: _wiki_rank(c, query, script_terms, chosen))
-            self.used.add(best.key)
-        item = replace(best)
-        try:
-            self._fetch(item, dest_dir, idx)
-        except Exception as e:
-            log.warning("Wikimedia reuse download failed (%s)", redact(e))
-            return None
-        return item
+                           dest_dir: Path, idx: int, exclude: str | None, subject: str = "",
+                           tries: int = 5) -> MediaItem | None:
+        """A pool photo for this scene when no fresh one fits: prefers one not used yet, never ``exclude`` (the
+        image on the two previous scenes). Like every other real photo it must be confirmed by the vision check
+        to show ``subject`` - one that isn't confirmed (a "no", an unreadable image, or no answer) is never
+        used. Returns None when no pool photo passes."""
+        for _ in range(tries):
+            with self.lock:
+                cands = [c for c in pool if c.key != exclude and c.key not in self._reuse_rejected]
+                unused = [c for c in cands if c.key not in self.used]
+                pick_from = unused or cands
+                if not pick_from:
+                    return None
+                best = max(pick_from, key=lambda c: _wiki_rank(c, query, script_terms, chosen))
+                self.used.add(best.key)
+            item = replace(best)
+            try:
+                self._fetch(item, dest_dir, idx)
+            except Exception as e:
+                log.warning("Wikimedia reuse download failed (%s)", redact(e))
+                self._reuse_rejected.add(best.key)
+                continue
+            if _low_quality_image(item.path):
+                self._reuse_rejected.add(best.key)
+                continue
+            verdict = self.verify_subject(item, subject or query)
+            if verdict is False or verdict == NO_ANSWER:
+                self._reuse_rejected.add(best.key)
+                if self._vision_unavailable:
+                    return None
+                continue
+            return item
+        return None
 
     def for_scene(self, idx: int, query: str, image_prompt: str, topic: str, need: float, dest_dir: Path) -> MediaItem:
         queries = []
