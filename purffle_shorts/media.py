@@ -57,6 +57,17 @@ STOP_WORDS = {"the", "a", "an", "of", "and", "in", "on", "with", "for", "to", "a
 
 
 AI_FALLBACK_SOURCES = {"pollinations", "cloudflare", "workers-ai", "flux", "openai-images", "gemini", "nano-banana"}
+MAX_STATUE_SCENES = 2        # at most this many scenes of a video may show a statue (week-1 review: too samey)
+# A photo whose title/categories say it is a statue / sculpture / idol, and one that says it is a view of the
+# outside of the place (the iconic opening shot) versus its inside.
+_STATUE_RE = re.compile(r"(?<![a-z])(statues?|statuettes?|sculptures?|sculpted|idols?|figurines?|busts?|buddhas?|"
+                        r"bodhisattvas?|deit(?:y|ies)|effigy|effigies|reclining|seated image|standing image)(?![a-z])",
+                        re.I)
+_EXTERIOR_RE = re.compile(r"(?<![a-z])(exterior|facade|façade|entrance|gate|gateway|front|outside|view|overview|"
+                          r"aerial|panorama|panoramic|skyline|complex|from the|rock|cliff|outer|approach|"
+                          r"courtyard|walls?|tower|stairs|steps)(?![a-z])", re.I)
+_INTERIOR_RE = re.compile(r"(?<![a-z])(interior|inside|within|hall|chamber|ceiling|mural|murals|fresco|frescoes|"
+                          r"frescos|painting|paintings|relics?|altar|shrine room|cave \d+)(?![a-z])", re.I)
 NO_ANSWER = "no-answer"      # verify_subject: a vision check was expected but no backend answered for this image
 VISION_GIVE_UP_FRESH = 3     # consecutive images with no answer, none ever answered  -> vision is down
 VISION_GIVE_UP_STREAK = 6    # consecutive images with no answer, even after some answered -> it went down
@@ -486,7 +497,11 @@ _ANACHRONISM_RE = re.compile(
     r"spectacles|eyeglasses|cameras?|photographs?|photos?|phones?|smartphones?|cars?|trucks?|bus|buses|"
     r"trains?|railways?|planes?|aeroplanes?|airplanes?|aircraft|helicopters?|motorbikes?|motorcycles?|"
     r"bicycles?|electric\w*|power lines?|light ?bulbs?|neon|plastic|concrete|asphalt|tarmac|tourists?|"
-    r"backpacks?|sunglasses|uniforms?|unesco|modern|contemporary|20th[- ]century|21st[- ]century)(?![a-z])",
+    r"backpacks?|sunglasses|uniforms?|unesco|modern|contemporary|20th[- ]century|21st[- ]century|"
+    # nothing gory or funerary: no skeletons, corpses, blood, wounds, graves or burials (the audience is 55+)
+    r"skeletons?|skeletal|skulls?|bones?|corpses?|cadavers?|dead|deceased|bod(?:y|ies)|remains|blood\w*|"
+    r"bleed\w*|wound\w*|gore|gory|graves?|graveyards?|burials?|buried|cemeter\w*|funerals?|mummy|mummies|"
+    r"executions?|executed|beheaded|slaughter\w*|massacres?|dying|died|tombs?|pyres?)(?![a-z])",
     re.I)
 _CLAUSE_SPLIT_RE = re.compile(r"\s*[,;.]\s*|\s+(?=(?:with|while|holding|carrying|beside|next to|near|under|"
                               r"over|beneath|behind)\s)", re.I)
@@ -581,6 +596,64 @@ _LOOK_LEAD_CHARS = 1500          # rules read the article's opening: what the pl
 LOOK_SCHEMA = {"type": "object", "additionalProperties": False,
                "properties": {"architecture": {"type": "string"}, "clothing": {"type": "string"}},
                "required": ["architecture", "clothing"]}
+
+
+# Before the place existed (or when its article gives no date) a scene is drawn period-neutral: the landscape,
+# caves and simple shelters, with people in plain hides and plant-fibre wraps - never the place's architecture.
+NEUTRAL_LOOK = {
+    "architecture": "the natural landscape of the place - rock, cliffs, caves and trees - with simple shelters of "
+                    "branches and thatch",
+    "clothing": "people in plain animal hides and woven plant-fibre wraps",
+}
+_PREHISTORIC_RE = re.compile(r"\b(prehistoric\w*|pre-?history|stone age|palaeolithic|paleolithic|mesolithic|neolithic|"
+                             r"bronze age|iron age|hunter[- ]gatherers?|early humans?|ancient peoples?|first "
+                             r"inhabitants|primeval|before (?:the|any) (?:temple|monastery|city|fort|town|village|"
+                             r"palace|buildings?)|long before)\b", re.I)
+_BUILD_VERBS = (r"(?:built|constructed|founded|established|erected|carved|commissioned|consecrated|"
+                r"inaugurated|began|dates? (?:back )?to|dating (?:back )?to|completed)")
+_CENTURY_RE = re.compile(r"\b(\d{1,2})(?:st|nd|rd|th)[- ]century(?:\s+(BCE?|B\.C\.?E?\.?|CE|AD))?", re.I)
+_YEAR_RE = re.compile(r"\b(\d{1,4})(?:\s*(BCE?|B\.C\.?E?\.?|CE|AD))\b|\b(?:in|by|around|circa|c\.|AD|from)\s+(\d{3,4})\b",
+                      re.I)
+
+
+def _years_in(text: str, edge: str = "start") -> list[int]:
+    """Calendar years a text names, BCE as negative: 'in 996 CE' -> 996, 'in 89 BCE' -> -89. A century is a
+    range, so '1st century BCE' is its ``edge``: "start" (-100, the earliest it can be) or "end" (-1)."""
+    out: list[int] = []
+    for m in _CENTURY_RE.finditer(text or ""):
+        c = int(m.group(1))
+        bce = bool(m.group(2) and m.group(2).upper().startswith("B"))
+        lo, hi = (-(c * 100), -(c * 100) + 99) if bce else ((c - 1) * 100, c * 100 - 1)
+        out.append(lo if edge == "start" else hi)
+    for m in _YEAR_RE.finditer(text or ""):
+        if m.group(1):
+            y = int(m.group(1))
+            out.append(-y if (m.group(2) or "").upper().startswith("B") else y)
+        elif m.group(3):
+            out.append(int(m.group(3)))
+    return out
+
+
+def built_year(article: str) -> int | None:
+    """When the place was first built/founded, from its own article: the earliest year named in a sentence
+    that says it was built, founded, carved, established ... (BCE negative). None when the text gives none."""
+    years: list[int] = []
+    for sentence in re.split(r"(?<=[.!?])\s+|\n+", (article or "")[:6000]):
+        if re.search(rf"\b{_BUILD_VERBS}\b", sentence, re.I) and not re.search(
+                r"(?i)\b(unesco|inscribed|designated|world heritage|restor|renovat|repair|excavat|reopen)", sentence):
+            years += [y for y in _years_in(sentence, "start") if y <= 2000]     # earliest it could have been
+    return min(years) if years else None
+
+
+def scene_precedes_place(text: str, built: int | None) -> bool:
+    """True when a scene is set BEFORE the place was built: it says prehistoric / stone age / long before the
+    temple ..., or names an era earlier than ``built``. A scene with no date of its own follows the place."""
+    if _PREHISTORIC_RE.search(text or ""):
+        return True
+    if built is None:
+        return False
+    years = _years_in(text or "", "end")                       # the latest each named era could be
+    return bool(years) and max(years) < built
 
 
 def look_from_text(place: str, article: str) -> dict:
@@ -996,10 +1069,12 @@ class Visuals:
 
     def _good_wiki(self, cands: list[MediaItem], query: str, script_terms: set[str], dest_dir: Path,
                    idx: int, tries: int = 4, avoid: set[str] | None = None, subject: str = "",
-                   landmark: bool = False) -> MediaItem | None:
+                   landmark: bool = False, no_statues: bool = False) -> MediaItem | None:
         """Claim the best fresh candidate and download it, skipping to the next if it is near-blank, or if a
         vision model says it doesn't actually show ``subject``. When vision can't run, a landmark scene also
         refuses a photo whose title's main subject is an animal or a person. Returns a fetched item or None."""
+        if no_statues:                                           # the statue cap is reached: no more statue photos
+            cands = [c for c in cands if not _STATUE_RE.search(c.text)]
         for _ in range(tries):
             item = self._claim_wiki(cands, query, script_terms, avoid)
             if item is None:
@@ -1154,6 +1229,10 @@ class Visuals:
             s += 1.5 if res >= 1600 else (1.0 if res >= 1000 else 0.3)
             if c.height >= c.width:                            # portrait/square crops to 9:16 with less loss
                 s += 0.8
+            if _EXTERIOR_RE.search(c.text):                    # the iconic OUTSIDE view opens the video
+                s += 3.0
+            if _STATUE_RE.search(c.text) or _INTERIOR_RE.search(c.text):
+                s = max(0.05, s * 0.25)                        # a statue or an interior: only if nothing else
             return s
 
         for _ in range(6):                                     # try the best few, skipping near-blank/mismatched
@@ -1181,7 +1260,8 @@ class Visuals:
 
     def for_place_scenes(self, jobs: list[tuple[str, str, bool]], place: str, country: str, dest_dir: Path,
                          progress=None, min_images: int = 5, lat: float | None = None, lon: float | None = None,
-                         article: str = "", title: str = "") -> list[MediaItem]:
+                         article: str = "", title: str = "",
+                         scene_texts: list[str] | None = None) -> list[MediaItem]:
         """One image per scene of the named place: a freely-licensed Wikimedia photo for scenes about the place
         TODAY, and a consistent-style AI illustration for scenes marked historical (the past can't be
         photographed). Only place-accurate photos are used (geosearch within ~5 km, or a title that names the
@@ -1209,21 +1289,34 @@ class Visuals:
         chosen: set[str] = set()                               # distinctive subjects already shown this video
         prev_key, consec = None, 0
         last = len(jobs) - 1
+        built = built_year(article)
+        exterior_subject = f"the exterior of {place}"           # what the opening scene must show, checked in pixels
+        statues = 0                                            # scenes already showing a statue (max MAX_STATUE_SCENES)
         for i, (q, prompt, historical) in enumerate(jobs):
             is_landmark = i == 0 or i == last                  # opener & closer must show the main landmark
-            subject = landmark_subject if is_landmark else (q or place)
-            item = (self._historical_image(prompt or q, dest_dir, i, arch=arch, clothing=clothing)
-                    if historical and arch else None)
+            subject = exterior_subject if i == 0 else (landmark_subject if is_landmark else (q or place))
+            no_statues = statues >= MAX_STATUE_SCENES
+            # A scene set before the place existed is drawn period-neutral (landscape, caves, simple shelters),
+            # never in the place's own architecture.
+            text = (scene_texts[i] if scene_texts and i < len(scene_texts) else "") + " " + (prompt or "")
+            before = bool(historical and scene_precedes_place(text, built))
+            scene_arch, scene_clothing = ((NEUTRAL_LOOK["architecture"], NEUTRAL_LOOK["clothing"]) if before
+                                          else (arch, clothing))
+            if before:
+                log.info("Scene %d is set before %s existed (built %s): period-neutral look", i + 1, place,
+                         built if built is not None else "?")
+            item = (self._historical_image(prompt or q, dest_dir, i, arch=scene_arch, clothing=scene_clothing)
+                    if historical and scene_arch else None)
             if item is None and i == 0:                        # opener: the strongest photo of the title landmark
-                item = self._open_landmark_image(pool, landmark_terms, place, country, dest_dir, landmark_subject)
+                item = self._open_landmark_image(pool, landmark_terms, place, country, dest_dir, exterior_subject)
             if item is None:                                   # place-today scene, or AI unavailable/failed
                 item = self._good_wiki(pool, q, script_terms, dest_dir, i, avoid=chosen,
-                                       subject=subject, landmark=is_landmark)
+                                       subject=subject, landmark=is_landmark, no_statues=no_statues)
             if item is None:                                   # no fresh place image -> place-named stock video
                 item = self._place_stock_video(q, place, country, dest_dir, i)
             if item is None:                                   # last resort: an unused place photo (never a repeat)
                 item = self._reuse_place_image(pool, q, script_terms, chosen, dest_dir, i, exclude=None,
-                                               subject=subject)
+                                               subject=subject, no_statues=no_statues)
             # Never show the same image for more than two scenes in a row: swap in a different pool photo.
             if item is not None and item.key == prev_key and consec >= 2:
                 alt = self._reuse_place_image(pool, q, script_terms, chosen, dest_dir, i, exclude=item.key,
@@ -1250,6 +1343,8 @@ class Visuals:
             prev_key = item.key
             if item.source == "wikimedia":                     # remember its subject so later scenes differ
                 chosen |= (_terms(item.text) - script_terms)
+                if _STATUE_RE.search(item.text):
+                    statues += 1
             self._record_credit(item)
             log.info("Scene %d: %s %s (%r)", i + 1, item.source, item.kind, q)
             results.append(item)
@@ -1259,14 +1354,15 @@ class Visuals:
 
     def _reuse_place_image(self, pool: list[MediaItem], query: str, script_terms: set[str], chosen: set[str],
                            dest_dir: Path, idx: int, exclude: str | None, subject: str = "",
-                           tries: int = 5) -> MediaItem | None:
+                           tries: int = 5, no_statues: bool = False) -> MediaItem | None:
         """A pool photo for this scene when no fresh one fits: prefers one not used yet, never ``exclude`` (the
         image on the two previous scenes). Like every other real photo it must be confirmed by the vision check
         to show ``subject`` - one that isn't confirmed (a "no", an unreadable image, or no answer) is never
         used. Returns None when no pool photo passes."""
         for _ in range(tries):
             with self.lock:
-                cands = [c for c in pool if c.key != exclude and c.key not in self._reuse_rejected]
+                cands = [c for c in pool if c.key != exclude and c.key not in self._reuse_rejected
+                         and not (no_statues and _STATUE_RE.search(c.text))]
                 unused = [c for c in cands if c.key not in self.used]
                 pick_from = unused or cands
                 if not pick_from:

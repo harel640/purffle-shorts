@@ -42,6 +42,22 @@ class LLMError(RuntimeError):
     pass
 
 
+# Circuit breaker: Gemini's free tier answers 503/429 (or hangs) for hours at a time, and every call used to
+# spend its timeout and retries on it before falling back to Groq - the 19:00 runs spent 20+ minutes in the
+# script stages and hit the 25-minute watchdog. After CIRCUIT_AFTER consecutive transient failures a provider
+# is skipped for the rest of the run (still tried as a last resort if every other provider fails).
+CIRCUIT_PROVIDERS = {"gemini"}
+CIRCUIT_AFTER = 2
+GEMINI_TIMEOUT = float(os.getenv("GEMINI_TIMEOUT", "30"))     # per call, seconds (was 180)
+_TRANSIENT_RE = re.compile(r"(?i)(http (429|5\d\d)|timed out|timeout|connection (aborted|reset|error)|"
+                           r"max retries|connectionerror|temporarily|overloaded|unavailable|high demand)")
+
+
+def is_transient_failure(error: BaseException) -> bool:
+    """A 503/429/timeout-style failure (the provider is busy or down), not a bad request or a bad reply."""
+    return bool(_TRANSIENT_RE.search(f"{type(error).__name__} {error}"))
+
+
 class ImageUnusable(LLMError):
     """The image itself can't be sent to a vision model (undecodable, or the backend says its format is
     unsupported) - a problem with THIS image, not an outage: the caller skips it and tries another."""
@@ -251,7 +267,7 @@ class OpenAICompatible(Provider):
             headers["X-Title"] = "PurffleShorts"
         try:
             # A local model on a laptop CPU can take minutes for one script; cloud APIs answer far sooner.
-            timeout = 600 if self.preset.local else 180
+            timeout = 600 if self.preset.local else (GEMINI_TIMEOUT if self.name == "gemini" else 180)
             r = http().post(f"{self.base_url}/chat/completions", json=payload, headers=headers, timeout=timeout)
             raise_for_status(r, f"{self}")
         except PermanentError as e:
@@ -432,15 +448,24 @@ class LLM:
         """``temperature`` overrides LLM_TEMPERATURE for this call (low for grading, where repeatability matters)."""
         errors: list[str] = []
         temp = self.settings.llm_temperature if temperature is None else temperature
-        providers = list(self.providers)
+        # Providers whose circuit is open go last: they are tried only if every other provider fails.
+        providers = ([p for p in self.providers if not self.circuit_open(p.name)]
+                     + [p for p in self.providers if self.circuit_open(p.name)])
         rl_waits: dict[int, int] = {}      # per-provider count of 60s waits already spent on a per-minute limit
         i = 0
         while i < len(providers):
             p = providers[i]
 
             def _call(p=p):
-                text = p.complete(system, user, schema=schema if schema is not None else {}, max_tokens=max_tokens,
-                                  temperature=temp)
+                t0 = time.time()
+                try:
+                    text = p.complete(system, user, schema=schema if schema is not None else {},
+                                      max_tokens=max_tokens, temperature=temp)
+                except Exception as e:
+                    self.note_failure(p.name, e)
+                    raise
+                self.note_success(p.name)
+                log.info("LLM %s answered in %.1fs", p, time.time() - t0)
                 return extract_json(text)
             try:
                 result = with_retries(_call, attempts=2, base_delay=3, label=f"LLM {p}")
@@ -469,6 +494,24 @@ class LLM:
                 log.warning("LLM %s failed: %s", p, e)
                 i += 1
         raise LLMError("All LLM providers failed:\n  " + "\n  ".join(errors))
+
+    # -- circuit breaker (see CIRCUIT_PROVIDERS) ------------------------------------------------------------
+    def circuit_open(self, name: str) -> bool:
+        return name in self.__dict__.setdefault("_cb_open", set())
+
+    def note_failure(self, name: str, error: BaseException) -> None:
+        """Count a transient failure; the CIRCUIT_AFTER-th in a row opens the circuit for the rest of the run."""
+        if name not in CIRCUIT_PROVIDERS or not is_transient_failure(error):
+            return
+        fails = self.__dict__.setdefault("_cb_fail", {})
+        fails[name] = fails.get(name, 0) + 1
+        if fails[name] >= CIRCUIT_AFTER and not self.circuit_open(name):
+            self._cb_open.add(name)
+            log.warning("%s circuit open: %d consecutive 503/429/timeouts (last: %s); skipping it for the rest "
+                        "of this run", name.title(), fails[name], redact(str(error))[:120])
+
+    def note_success(self, name: str) -> None:
+        self.__dict__.setdefault("_cb_fail", {})[name] = 0
 
     @staticmethod
     def _yes_no(answer: str) -> bool | None:
@@ -518,7 +561,7 @@ class LLM:
         question = self._vision_question(subject)
         image_error: Exception | None = None
 
-        gem = self._gemini_vision_model()
+        gem = self._gemini_vision_model() if not self.circuit_open("gemini") else None
         if gem:
             key, model = gem
             uri = f"data:{mime};base64,{base64.b64encode(raw).decode()}"
@@ -528,14 +571,16 @@ class LLM:
                            {"type": "image_url", "image_url": {"url": uri}}]}]}
             try:
                 r = http().post("https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
-                                json=payload, timeout=60,
+                                json=payload, timeout=GEMINI_TIMEOUT,
                                 headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"})
                 raise_for_status(r, "Gemini vision")
                 v = self._yes_no(r.json()["choices"][0]["message"]["content"])
+                self.note_success("gemini")
                 if v is not None:
                     return v
             except Exception as e:
                 log.debug("Gemini vision failed: %s", redact(e))
+                self.note_failure("gemini", e)
                 if isinstance(e, PermanentError) and _IMAGE_ERROR_RE.search(str(e)):
                     image_error = e
 
