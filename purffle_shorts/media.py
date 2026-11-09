@@ -473,7 +473,32 @@ def cloudflare_image(prompt: str, dest: Path, account_id: str, token: str, steps
 
 # Period discipline for every historical AI illustration. Positive detail only — FLUX draws whatever is named.
 # The clothing and architecture come from the place's own article (place_look), never a generic default.
-_HISTORICAL_PERIOD = "period-accurate historical scene, lit by oil lamps and daylight"
+_HISTORICAL_PERIOD = ("period-accurate historical scene: only hand-made things of that time - wood, stone, "
+                      "woven cloth, clay and iron - lit by oil lamps and daylight")
+
+# Things that don't belong in a past scene: maps, flags, documents and anything modern. FLUX draws whatever a
+# prompt NAMES (a "no maps" negative would draw a map), so a clause that names one is dropped from the prompt
+# instead, leaving only period-appropriate people, buildings, landscape and hand-made objects.
+_ANACHRONISM_RE = re.compile(
+    r"(?<![a-z])(maps?|cartograph\w*|atlas(?:es)?|flags?|banners?|pennants?|documents?|papers?|paperwork|"
+    r"newspapers?|letters?|books?|scrolls?|manuscripts?|ledgers?|signs?|signboards?|signposts?|posters?|"
+    r"plaques?|certificates?|charts?|diagrams?|blueprints?|globes?|compass(?:es)?|clocks?|wristwatch\w*|"
+    r"spectacles|eyeglasses|cameras?|photographs?|photos?|phones?|smartphones?|cars?|trucks?|bus|buses|"
+    r"trains?|railways?|planes?|aeroplanes?|airplanes?|aircraft|helicopters?|motorbikes?|motorcycles?|"
+    r"bicycles?|electric\w*|power lines?|light ?bulbs?|neon|plastic|concrete|asphalt|tarmac|tourists?|"
+    r"backpacks?|sunglasses|uniforms?|unesco|modern|contemporary|20th[- ]century|21st[- ]century)(?![a-z])",
+    re.I)
+_CLAUSE_SPLIT_RE = re.compile(r"\s*[,;.]\s*|\s+(?=(?:with|while|holding|carrying|beside|next to|near|under|"
+                              r"over|beneath|behind)\s)", re.I)
+
+
+def period_prompt(text: str) -> str:
+    """``text`` with every clause that names a map, flag, document, written text or modern object removed, so
+    an AI past scene shows only period-appropriate things. "" when nothing worth drawing is left."""
+    kept = [c.strip() for c in _CLAUSE_SPLIT_RE.split(text or "") if c and c.strip()]
+    kept = [c for c in kept if not _ANACHRONISM_RE.search(c)]
+    out = ", ".join(kept).strip(" ,")
+    return out if len(out.split()) >= 3 else ""
 
 # Scenes that must NOT be AI-generated: a deity, god or religious figure. We illustrate these with a real photo
 # of the temple/place instead and let the narration tell the myth as "legend says".
@@ -1014,6 +1039,15 @@ class Visuals:
         if _DEITY_RE.search(prompt or ""):
             log.info("Scene %d: a deity/religious figure — using a real photo, not an AI image", idx + 1)
             return None
+        clean = period_prompt(prompt)
+        if not clean:
+            log.info("Scene %d: the scene is about maps/flags/documents/modern things - using a real photo",
+                     idx + 1)
+            return None
+        if clean != (prompt or "").strip().rstrip("."):
+            log.info("Scene %d: dropped non-period objects from the AI prompt", idx + 1)
+        prompt = clean
+        arch, clothing = period_prompt(arch) or arch, period_prompt(clothing)
         style = s.ai_scene_style or s.visual_style
         # Architecture leads (it anchors the look), then the people's clothing. Positive description only — FLUX
         # draws whatever is named, so we ask for a full-bleed vertical frame rather than listing negatives.

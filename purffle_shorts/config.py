@@ -102,6 +102,8 @@ class Settings:
     topics_file: str = "topics.txt"
     topic_list_file: str = ""         # ranked JSON topic list picked from first (e.g. a weekly scout's output)
     topic_list_max_age_days: int = 10  # an older list is stale and ignored
+    place_country_gap_days: int = 0    # place videos: at most one per country within this many days (0 = off)
+    place_country_week_max: int = 0    # place videos: at most this many per country in 7 days (0 = off)
     trends_geo: str = "US"
     style: str = "auto"               # auto|facts|story|listicle|myth|quiz|motivational|news|explainer|dialogue|chat
     language: str = "en"
@@ -306,6 +308,8 @@ class Settings:
             topics_file=_env("TOPICS_FILE", d.topics_file),
             topic_list_file=_env("TOPIC_LIST_FILE", d.topic_list_file),
             topic_list_max_age_days=_int("TOPIC_LIST_MAX_AGE_DAYS", d.topic_list_max_age_days),
+            place_country_gap_days=_int("PLACE_COUNTRY_GAP_DAYS", d.place_country_gap_days),
+            place_country_week_max=_int("PLACE_COUNTRY_WEEK_MAX", d.place_country_week_max),
             trends_geo=_env("TRENDS_GEO", d.trends_geo),
             style=_env("SCRIPT_STYLE", d.style).lower(),
             language=_env("LANGUAGE", d.language).lower(),

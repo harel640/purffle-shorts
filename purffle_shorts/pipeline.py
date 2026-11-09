@@ -27,6 +27,7 @@ from .media import MediaItem, NeuronBudget, SkipTopic, Visuals, background_item,
 from .overlays import EMOJI_CREDIT, ChatMessage, build_overlays
 from .render import pick_cover, render_video, split_sizes
 from .script import (
+    HISTORY_RANGE,
     AUTO_STYLES,
     CARD_STYLES,
     DEFAULT_CAST,
@@ -35,7 +36,10 @@ from .script import (
     STORY_STYLES,
     STYLES,
     Script,
+    ensure_concrete_hook,
+    fit_story_length,
     load_script,
+    recent_violence_reason,
     localize_metadata,
     review_script,
     translate_script,
@@ -434,6 +438,25 @@ class Studio:
                 log.warning("Voice engine '%s' failed: %s", eng, e)
         raise RuntimeError(f"All voice engines failed: {last}")
 
+    def _length_gate(self, script: Script, speech, total: float, work: Path, folder: Path, s: Settings):
+        """Hard length gate on the MEASURED voice-over: a story Short renders only if it runs 45-60s. Otherwise
+        the narration is expanded/trimmed ONCE to fit (at the voice's real speaking rate) and re-voiced; still
+        outside the window -> SkipTopic. Returns (script, speech, total)."""
+        lo, hi = HISTORY_RANGE
+        if lo <= total <= hi:
+            return script, speech, total
+        fixed = fit_story_length(self.llm, script, total, lo, hi) if self.llm is not None else None
+        if fixed is not None:
+            script = fixed
+            (folder / "script.json").write_text(json.dumps(script.to_dict(), indent=2, ensure_ascii=False),
+                                                encoding="utf-8")
+            speech = self._speak(script, work, s)
+            total = round(speech.duration + END_PAD, 3)
+            log.info("Voice-over after the length rewrite: %.1fs", total)
+        if not lo <= total <= hi:
+            raise SkipTopic(f"video would run {total:.1f}s, outside {lo}-{hi}s after one rewrite")
+        return script, speech, total
+
     # ------------------------------------------------------------------ script only
     def draft(self, topic: str | None = None, *, source: str | None = None, style: str | None = None,
               url: str | None = None, document: str | Path | None = None) -> tuple[Script, Topic, str]:
@@ -505,6 +528,14 @@ class Studio:
             if self.llm is not None and not s.offline and s.fact_check:
                 script = factcheck.scrub(self.llm, script, s)
                 script = factcheck.ground(script, pick.source_text, s)   # drop any invented specifics
+            if script.style in STORY_STYLES and self.llm is not None and not s.offline:
+                # A story's title, on-screen hook and opening line must state concrete stakes, not a vague
+                # mystery (week-1 analytics); one rewrite if they don't.
+                script = ensure_concrete_hook(self.llm, script, place_title=place_locked_channel)
+            if script.style in STORY_STYLES:
+                why = recent_violence_reason(script)       # the channel never tells recent tragedies
+                if why:
+                    raise SkipTopic(f"topic centred on {why}")
         except BaseException:
             if pick.idea_id:
                 self.history.release_idea(pick.idea_id)
@@ -626,6 +657,10 @@ class Studio:
                         place=place, country=country, days=PLACE_REUSE_DAYS)
                     if why:
                         raise SkipTopic(f"place '{place}' was already made in the last {PLACE_REUSE_DAYS} days ({why})")
+                    too_soon = self.history.country_quota_reason(pick.country or country, s.place_country_gap_days,
+                                                                 s.place_country_week_max)
+                    if too_soon:
+                        raise SkipTopic(f"country pacing: {too_soon}")
             # Sensitive-region policy skip (separate from travel advisories): by the RESOLVED place's
             # region/province ONLY — not by words that merely appear in the narration or article. A village
             # that mentions a nearby border (e.g. Chitkul near Tibet) is not in that region and is not blocked;
@@ -640,6 +675,8 @@ class Studio:
             self._step("voice", f"{s.tts_engine} voice")
             speech = self._speak(script, work, s)
             total = round(speech.duration + END_PAD, 3)
+            if script.style in STORY_STYLES and not s.offline and media_map is None:
+                script, speech, total = self._length_gate(script, speech, total, work, folder, s)
             chat = script.style == "chat"
             timeline = scene_timeline([sc.narration for sc in script.scenes], speech.words, total, s.language,
                                       starts=speech.line_starts, min_len=4.5 if chat else 1.2)
@@ -792,7 +829,8 @@ class Studio:
                 folder=str(folder), video_path=str(video), duration=info["duration"],
                 llm=meta["llm"], voice=meta["voice"], status="rendered", score=script.score, parent_id=parent_id,
                 resolved_place=(", ".join(x for x in (place, country) if x) or None),
-                wiki_page=wiki_page or None, lat=coords[0] if coords else None, lon=coords[1] if coords else None)
+                wiki_page=wiki_page or None, lat=coords[0] if coords else None, lon=coords[1] if coords else None,
+                country=(pick.country or country or None))
             state["record_id"] = rid
             if not media_map:
                 self.history.mark_media([m.key for m in media if m.source not in REUSABLE_SOURCES])

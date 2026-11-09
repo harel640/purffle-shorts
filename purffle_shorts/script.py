@@ -30,10 +30,10 @@ LANGUAGES = {
 STYLES = {
     "facts": "Rapid-fire surprising facts about one specific subject, each one more surprising than the last.",
     "story": "A tight true story: a hook that opens a loop, rising tension, then a satisfying twist or payoff.",
-    "history": "A story-driven mini-documentary about one real place: open on a mystery question, follow one "
+    "history": "A story-driven mini-documentary about one real place: open on the concrete stakes, follow one "
                "human thread (the builders, a ruler, a rescue, a disappearance) to a turning point, and land a "
                "calm, reflective payoff. Cinematic and unhurried — a story, never a list of facts.",
-    "place": "A story-driven portrait of one real place AS IT IS TODAY: open on a mystery question, then reveal "
+    "place": "A story-driven portrait of one real place AS IT IS TODAY: open on what is at stake, then reveal "
              "what makes this place special — its setting and landscape, how it looks and feels, the life and "
              "culture around it, and any local legend — and land a calm, reflective payoff. Cinematic and "
              "unhurried, built only on what a visitor can actually see; no invented or dated history.",
@@ -231,16 +231,18 @@ def scene_plan(style: str, target_seconds: int) -> tuple[int, int]:
 def _format_rules(style: str) -> str:
     if style == "history":
         return ("- speaker is always \"A\": one calm, cinematic narrator.\n"
-                "- Scene 1 narration IS the mystery question that opens the story (8-12 words, UNDER 60 "
-                "characters, no greeting), and the title is that exact question.\n"
+                "- Scene 1 narration states the story's CONCRETE STAKES in one line (8-14 words, no greeting): "
+                "who or what, and what was won or lost, with a number, date or superlative - a statement, not a "
+                "vague question (\"One of history's richest cities vanished in months.\").\n"
                 "- Tell ONE human thread: who built it, who ruled or lost it, a rescue, a disappearance, with "
                 "ONE clear turning point in the middle. Keep it to that single thread — do NOT list several "
                 "rulers, dates or battle details. ONLY well-established history; never invent names, dates, "
                 "numbers or quotes.\n")
     if style == "place":
         return ("- speaker is always \"A\": one calm, cinematic narrator.\n"
-                "- Scene 1 narration IS the mystery question that opens the story (8-12 words, UNDER 60 "
-                "characters, no greeting), and the title is that exact question.\n"
+                "- Scene 1 narration states the story's CONCRETE STAKES in one line (8-14 words, no greeting): "
+                "who or what, and what was won or lost, with a number, date or superlative - a statement, not a "
+                "vague question (\"One of history's richest cities vanished in months.\").\n"
                 "- Reveal what makes THIS place special TODAY: its setting and landscape, how it looks and "
                 "feels, the life and culture around it, and any local legend (say \"legend says\"). Do NOT "
                 "narrate dated historical events, rulers, battles, dynasties or founding dates — describe the "
@@ -288,7 +290,9 @@ def build_prompt(subject: str, style: str, settings: Settings, avoid: list[str],
             "\"Hampi Virupaksha temple\", \"Vittala stone chariot\"), so a real photo of it can be found.\n"
             "- image_prompt: for a PAST scene, one vivid English sentence recreating that historical moment — the "
             "ordinary people (builders, traders, rulers, pilgrims), their clothing and the architecture as they "
-            "were then. Describe only what is in the scene. NEVER depict a god, goddess, deity or religious "
+            "were then. Describe only what is in the scene: people, buildings, landscape and hand-made objects of "
+            "that period (tools of wood, stone and iron, cloth, baskets, clay pots, carts, boats). Never a map, "
+            "flag, banner, document, sign, written text or any modern object. NEVER depict a god, goddess, deity or religious "
             "figure; a myth is told in the narration as \"legend says\" and shown with a real photo of the "
             "temple, so mark such a scene historical=false.\n"
             "- historical: true only for a scene of real PAST people/events we may illustrate; false for a scene "
@@ -311,6 +315,12 @@ def build_prompt(subject: str, style: str, settings: Settings, avoid: list[str],
                   "name (it is put in front: \"HAMPI: The Richest City That Vanished\"). No hashtags, no quotes."
                   if place_title else
                   "- title: max 60 characters, curiosity-driven but honest, no hashtags, no quotes.")
+    if story:
+        title_rule += ("\n" + STAKES_RULE)
+    hook_rule = ("one sentence stating the same concrete stakes as the title (who or what, and what was won or "
+                 "lost), with a number, date or superlative from the background." if story else
+                 "a bold claim or question that stops the scroll in under 2 seconds.")
+    hook_text_rule = (": concrete (a number, a name or a superlative), never a vague mystery phrase" if story else "")
     description_rule = ("- description: ONE sentence summarising the video that names the place and its country. "
                         "No hashtags." if place_title else
                         "- description: 2-3 sentences plus one question that invites comments. No hashtags.")
@@ -338,13 +348,13 @@ Language: {lang} for narration, title, hook_text, cast and description. search_q
 
 {ctx}{ins}{avoid_block}Rules:
 - Total narration about {words} words (~{eff} seconds spoken), split into about {n_scenes} scenes.
-{length_rule}{_format_rules(style)}- Scene 1 is the hook: a bold claim or question that stops the scroll in under 2 seconds. Never "In this video", never a greeting.
+{length_rule}{_format_rules(style)}- Scene 1 is the hook: {hook_rule} Never "In this video", never a greeting.
 - Every line earns its place: concrete details, numbers, names. Only well-established facts; no made-up statistics.
 {ending}- Narration is spoken by a voice: no emojis, hashtags, labels, brackets or stage directions.
 {visual_rules}- emphasis: the 1-2 words of that scene's narration that carry it (a number, a name, the surprising word), copied exactly as written there. They are highlighted on screen; use [] when nothing stands out.
 - emoji: ONE emoji that fits that scene, popped up on screen above the captions (e.g. 🐙 for an octopus, 🤯 for a twist), or "" when none fits. Never put emoji in the narration.
 {title_rule}
-- hook_text: max 6 words shown on screen during the first seconds.
+- hook_text: max 6 words shown on screen during the first seconds{hook_text_rule}.
 {description_rule}
 - hashtags: 3-5 relevant hashtags. tags: 8-15 search keywords.
 - category: one of {", ".join(CATEGORIES)}.
@@ -527,60 +537,149 @@ def write_script(llm, subject: str, settings: Settings, *, source: str = "niche"
     script = normalize(data, subject, style, settings.language)
     log.info("Script (%s, %d words, %d scenes): %s", style, word_count(script.narration, settings.language),
              len(script.scenes), script.title)
-    if style in STORY_STYLES:
-        script = _ensure_story_length(llm, script, subject, settings)
     return script
 
 
-def _ensure_story_length(llm, script: Script, subject: str, settings: Settings) -> Script:
-    """A history/place Short must run at least ~45s. If the draft is shorter, ask the writer ONCE to expand
-    it into the 115-155 word range (same structure and facts, longer narration). If it is still short after
-    that, render anyway and log it — a slightly short Short beats no Short."""
-    lo, hi = HISTORY_RANGE
-    secs = word_count(script.narration, script.language) / WORDS_PER_SECOND
-    if secs >= lo:
-        return script
-    log.info("Script is ~%.0fs (%d words), under the %d-%ds target — asking the writer to expand it once",
-             secs, word_count(script.narration, script.language), lo, hi)
-    try:
-        expanded = _expand_story(llm, script, subject)
-    except Exception as e:  # noqa: BLE001 — a failed expansion must never sink the render
-        log.warning("Script expansion failed (%s); rendering the short draft", e)
-        return script
-    new_secs = word_count(expanded.narration, expanded.language) / WORDS_PER_SECOND
-    chosen, chosen_secs = (expanded, new_secs) if new_secs > secs else (script, secs)
-    if chosen_secs < lo:
-        log.warning("Script is still ~%.0fs after one expansion (target %d-%ds); rendering anyway",
-                    chosen_secs, lo, hi)
-    else:
-        log.info("Script expanded to ~%.0fs (%d words)", chosen_secs,
-                 word_count(chosen.narration, chosen.language))
-    return chosen
-
-
-def _expand_story(llm, script: Script, subject: str) -> Script:
-    """One targeted rewrite that only lengthens the narration, preserving title, hook, scene order, each
-    scene's search_query/image_prompt/historical flag, and every stated fact (no invented specifics)."""
-    lo, hi = HISTORY_RANGE
+def fit_story_length(llm, script: Script, seconds: float, lo: float = HISTORY_RANGE[0],
+                     hi: float = HISTORY_RANGE[1]) -> Script | None:
+    """ONE rewrite of a story script whose voice-over ran ``seconds`` (outside ``lo``-``hi``): expanded or
+    trimmed to the number of words that fills the middle of the window at the voice's REAL speaking rate.
+    Same title, hook, scenes, facts. None if the rewrite failed (the caller then skips the video)."""
     n = word_count(script.narration, script.language)
+    if not n or seconds <= 0:
+        return None
+    rate = n / seconds                                          # words per second, as actually spoken
+    lo_w, hi_w = int(rate * (lo + 2)), int(rate * (hi - 2))     # a little inside the window
+    verb = "too short" if seconds < lo else "too long"
+    log.info("Voice-over is %.1fs (%s for %g-%gs); rewriting once to %d-%d words", seconds, verb, lo, hi,
+             lo_w, hi_w)
+    try:
+        return _resize_story(llm, script, script.topic, lo_w, hi_w,
+                             f"{verb} (~{n} words, {seconds:.0f}s spoken; it must run {lo:g}-{hi:g}s)")
+    except Exception as e:  # noqa: BLE001
+        log.warning("Length rewrite failed (%s)", e)
+        return None
+
+
+def _resize_story(llm, script: Script, subject: str, lo_words: int, hi_words: int, why: str) -> Script:
+    """One targeted rewrite of the narration's LENGTH only, preserving title, hook, scene order, each
+    scene's search_query/image_prompt/historical flag, and every stated fact (no invented specifics)."""
     system = ("You are a top YouTube Shorts scriptwriter and editor. You reply with a single JSON object "
               "and nothing else.")
     user = (
-        f"This {script.style} Short script is too short (~{n} words, under {lo}s). Expand the NARRATION of "
-        f"each scene so the whole script is BETWEEN 115 and 155 words and runs {lo}-{hi}s, adding vivid, "
-        f"period-accurate sensory detail. Keep the SAME title, hook_text, the SAME number of scenes and their "
-        f"order, and each scene's search_query, image_prompt and historical flag unchanged. Do NOT invent "
-        f"names, dates, numbers or events that are not already in the draft; only enrich what is there. Keep "
-        f"the ending as ONE short, open question to the viewer. Reply with the same JSON shape.\n\n"
+        f"This {script.style} Short script is {why}. Rewrite the NARRATION of the scenes so the whole script "
+        f"is BETWEEN {lo_words} and {hi_words} words - expand with vivid, period-accurate detail, or cut "
+        f"repetition and side details, as needed. Keep the SAME title, hook_text, the SAME number of scenes and "
+        f"their order, and each scene's search_query, image_prompt and historical flag unchanged. Do NOT invent "
+        f"names, dates, numbers or events that are not already in the draft. Keep the ending as ONE short, "
+        f"open question to the viewer. Reply with the same JSON shape.\n\n"
         f"Draft:\n{json.dumps(script.to_dict(), ensure_ascii=False)}")
     data = llm.complete_json(system, user, SCRIPT_SCHEMA, max_tokens=12000)
     merged = script.to_dict()                       # keep tags, hashtags, description, category, topic
     if data.get("scenes"):
-        merged["scenes"] = data["scenes"]           # take the expander's longer narration
-    for k in ("title", "hook_text"):
-        if data.get(k):
-            merged[k] = data[k]
-    return normalize(merged, subject, script.style, script.language)
+        merged["scenes"] = data["scenes"]
+    out = normalize(merged, subject, script.style, script.language)
+    out.score, out.review, out.rubric = script.score, script.review, script.rubric
+    return out
+
+
+# ---------------------------------------------------------------------------------- concrete stakes (#3)
+# Week-1: titles with concrete stakes held viewers ("one of history's richest cities vanished in months");
+# vague mystery words did not ("mystery?", "echoes today", "vanished overnight?").
+STAKES_RULE = ("  It must state CONCRETE STAKES from the story - who or what, and what was won or lost, with a "
+               "number, date or superlative (e.g. \"One of history's richest cities vanished in months\"). Never "
+               "vague mystery words: mystery, secret, hidden, echoes, whispers, untold, forgotten, legend, "
+               "\"vanished overnight?\", \"what happened?\".")
+_VAGUE_RE = re.compile(r"\b(myster(?:y|ies|ious)|secrets?|secretly|hidden|echo(?:es|ing)?|whisper\w*|untold|"
+                       r"unknown|enigma\w*|legend(?:s|ary)?|forgotten|lost to time|you won'?t believe|"
+                       r"what happened|vanished overnight|stand(?:s)? untouched|truth about)\b", re.I)
+_CONCRETE_RE = re.compile(r"\d|\b(one|two|three|four|five|six|seven|eight|nine|ten|twelve|hundred|thousand|"
+                          r"million|dozens?|centur(?:y|ies)|richest|largest|biggest|oldest|first|last|only|"
+                          r"tallest|longest|deepest|highest|greatest|fastest|months?|weeks?|days?|years?)\b", re.I)
+
+
+def vague_hook_reason(text: str) -> str:
+    """Why a title or hook is vague rather than stating concrete stakes, or ""."""
+    text = (text or "").strip()
+    if not text:
+        return ""
+    m = _VAGUE_RE.search(text)
+    if m:
+        return f"vague word {m.group(0)!r}"
+    if text.endswith("?") and not _CONCRETE_RE.search(text):
+        return "a question with no concrete stakes (no number, date or superlative)"
+    return ""
+
+
+HOOK_SCHEMA = {"type": "object", "additionalProperties": False,
+               "properties": {"title": {"type": "string"}, "hook_text": {"type": "string"},
+                              "opening": {"type": "string"}},
+               "required": ["title", "hook_text", "opening"]}
+
+
+def ensure_concrete_hook(llm, script: Script, place_title: bool = False) -> Script:
+    """A story script's title, on-screen hook and spoken opening must state concrete stakes. If any of them is
+    vague, ONE rewrite of the three from the script's own facts; a part that is still vague is kept as the
+    better of the two and logged (the length and safety gates decide whether the video is made)."""
+    if script.style not in STORY_STYLES or not script.scenes:
+        return script
+    parts = {"title": script.title, "hook_text": script.hook_text, "opening": script.scenes[0].narration}
+    vague = {k: vague_hook_reason(v) for k, v in parts.items()}
+    if not any(vague.values()) or llm is None:
+        return script
+    log.info("Hook is vague (%s); rewriting it once with concrete stakes",
+             "; ".join(f"{k}: {v}" for k, v in vague.items() if v))
+    title_len = 40 if place_title else 60
+    user = (
+        "Rewrite the title, on-screen hook_text and spoken opening of this YouTube Short so each states "
+        "CONCRETE STAKES taken from the narration below - who or what, and what was won or lost, with a "
+        "number, date or superlative it states (e.g. \"One of history's richest cities vanished in months\"). "
+        "Never vague mystery words: mystery, secret, hidden, echoes, whispers, untold, forgotten, legend, "
+        "unknown, \"vanished overnight\", \"what happened\". Do NOT invent facts. "
+        f"title: max {title_len} characters" + (", without the place name" if place_title else "") + ". "
+        "hook_text: max 6 words. opening: one sentence that replaces the first line of the narration.\n\n"
+        f"Current title: {script.title}\nCurrent hook_text: {script.hook_text}\n"
+        f"Narration: {script.narration}")
+    try:
+        d = llm.complete_json("You are a top YouTube Shorts editor. Reply with strict JSON.", user, HOOK_SCHEMA,
+                              max_tokens=1500, temperature=0.4)
+    except Exception as e:  # noqa: BLE001
+        log.warning("Hook rewrite failed (%s); keeping the original", e)
+        return script
+    new = {k: str((d or {}).get(k, "")).strip() for k in parts} if isinstance(d, dict) else {}
+    if new.get("title") and not vague_hook_reason(new["title"]):
+        script.title = truncate_words(re.sub(r"[<>\"“”]", "", strip_emoji(new["title"])).strip(" '-:"), 60)
+    if new.get("hook_text") and not vague_hook_reason(new["hook_text"]):
+        script.hook_text = truncate_words(re.sub(r"[<>\"“”]", "", strip_emoji(new["hook_text"])).strip(), 48)
+    if new.get("opening") and not vague_hook_reason(new["opening"]):
+        script.scenes[0].narration = clean_narration(new["opening"])
+    still = [k for k in parts if vague_hook_reason({"title": script.title, "hook_text": script.hook_text,
+                                                     "opening": script.scenes[0].narration}[k])]
+    if still:
+        log.warning("Hook still vague after one rewrite: %s", ", ".join(still))
+    return script
+
+
+# ---------------------------------------------------------------------------------- recent violence (#5)
+_VIOLENCE_RE = re.compile(r"\b(killed|killing|kill|died|dies|deaths?|dead|massacres?|massacred|shot|shooting|"
+                          r"bomb\w*|blasts?|explosions?|attacks?|attacked|protests?|protesters?|riots?|rioting|"
+                          r"uprising|coup|crackdown|insurgen\w*|militants?|terror\w*|assassinat\w*|clashes|"
+                          r"curfew|martyrs?|war|wars|genocide|executed|executions?|refugees?|casualties|"
+                          r"earthquake killed|tragedy|tragedies)\b", re.I)
+_RECENT_RE = re.compile(r"\b(19\d\d|20\d\d)s?\b|\b(recent(?:ly)?|last year|this year|nowadays|today'?s)\b",
+                        re.I)
+
+
+def recent_violence_reason(script: Script) -> str:
+    """Why a script is about recent deaths, protests, riots or political violence (after 1900), or "". Any
+    sentence of the title, hook or narration that names such an event together with a 1900+ year (or
+    'recently') counts: the channel tells stories of the deep past, not of recent suffering."""
+    text = " ".join([script.title, script.hook_text] + [sc.narration for sc in script.scenes])
+    for sentence in re.split(r"(?<=[.!?])\s+", text):
+        v, r = _VIOLENCE_RE.search(sentence), _RECENT_RE.search(sentence)
+        if v and r:
+            return f"recent violence or deaths: {v.group(0)!r} with {r.group(0)!r} in \"{sentence.strip()[:90]}\""
+    return ""
 
 
 # --------------------------------------------------------------------------------------------------

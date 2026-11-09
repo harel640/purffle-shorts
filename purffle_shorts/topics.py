@@ -333,6 +333,11 @@ def from_list(settings: Settings, history: History) -> Topic | None:
                 wiki_page=str(e.get("wikipedia_title") or ""), lat=lat if isinstance(lat, (int, float)) else None,
                 lon=lon if isinstance(lon, (int, float)) else None, place=place, country=country):
             continue
+        too_soon = history.country_quota_reason(country, settings.place_country_gap_days,
+                                                settings.place_country_week_max)
+        if too_soon:                # not claimed: it stays on the list for a later run
+            log.info("Topic list: #%s %s waits - %s", e.get("rank", "?"), place, too_soon)
+            continue
         history.mark_topic(key)    # claimed now: if this video is skipped, the next run takes the next place
         subject = list_subject(place, region, country)
         log.info("Topic list: #%s %s", e.get("rank", "?"), subject)
