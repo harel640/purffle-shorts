@@ -78,10 +78,11 @@ def test_history_style_is_story_driven_and_longer():
     assert effective_seconds("facts", 40) == 40
 
 
-def test_history_prompt_asks_for_mystery_and_hybrid_visuals():
+def test_history_prompt_asks_for_concrete_stakes_and_hybrid_visuals():
     _system, user = build_prompt("Hampi", "history", Settings(), [])
     low = user.lower()
-    assert "mystery question" in low and "turning point" in low   # story structure
+    assert "concrete stakes" in low and "turning point" in low    # story structure
+    assert "mystery question" not in low                          # week-1: vague mystery hooks lost viewers
     assert "historical" in low and "today" in low                 # hybrid visual routing explained
     assert "call to action" not in low                            # calm payoff, no CTA push
     assert "historical" in SCRIPT_SCHEMA["properties"]["scenes"]["items"]["required"]
@@ -158,36 +159,43 @@ _LONG = " ".join(["The granite city rose beside the river and traders filled its
 _SHORT = "A stone city rose here and then fell silent."                                                      # ~10w
 
 
-def test_short_story_script_is_expanded_once():
-    from purffle_shorts.script import word_count, write_script
-    llm = _SeqLLM(_story_data(_SHORT), _story_data(_LONG))
-    s = write_script(llm, "Hampi", Settings(), style="history")
-    assert llm.calls == 2                                  # wrote once, then expanded exactly once
-    assert word_count(s.narration, "en") >= 117            # now long enough to run >= 45s
-
-
-def test_short_story_script_renders_anyway_if_still_short(caplog):
-    from purffle_shorts.script import word_count, write_script
-    llm = _SeqLLM(_story_data(_SHORT), _story_data(_SHORT))   # the expansion comes back short too
-    with caplog.at_level("WARNING", logger="purffle"):
-        s = write_script(llm, "Hampi", Settings(), style="history")
-    assert llm.calls == 2                                  # expanded once, not in a loop
-    assert word_count(s.narration, "en") < 117             # rendered anyway, still short
-    assert any("after one expansion" in r.getMessage() for r in caplog.records)
-
-
-def test_long_story_script_is_not_expanded():
+def test_writing_a_story_is_one_call_the_length_is_fixed_after_the_voice_over():
+    # The one length rewrite now happens on the MEASURED voice-over (pipeline), not on a word estimate here.
     from purffle_shorts.script import write_script
-    llm = _SeqLLM(_story_data(_LONG))
+    llm = _SeqLLM(_story_data(_SHORT))
     write_script(llm, "Hampi", Settings(), style="history")
-    assert llm.calls == 1                                  # already >= 45s; no second call
-
-
-def test_facts_style_is_never_expanded():
-    from purffle_shorts.script import write_script
-    llm = _SeqLLM(_story_data(_SHORT))                     # short, but facts has no 45s floor
-    write_script(llm, "octopus", Settings(), style="facts")
     assert llm.calls == 1
+
+
+def test_fit_story_length_resizes_once_at_the_real_speaking_rate():
+    from purffle_shorts.script import fit_story_length, normalize, word_count
+    seen = {}
+
+    class LLM:
+        def complete_json(self, system, user, schema=None, max_tokens=0, temperature=None):
+            seen["user"] = user
+            return _story_data(_LONG)
+
+    short = normalize(_story_data(_SHORT), "Hampi", "history", "en")       # ~10 words spoken in 4 s
+    fixed = fit_story_length(LLM(), short, seconds=4.0)
+    assert fixed is not None and word_count(fixed.narration, "en") > 100
+    assert fixed.title == short.title                                       # only the length changed
+    n = word_count(short.narration, "en")
+    rate = n / 4.0
+    assert f"BETWEEN {int(rate * 47)} and {int(rate * 58)} words" in seen["user"] and "too short" in seen["user"]
+    long = normalize(_story_data(_LONG), "Hampi", "history", "en")
+    fit_story_length(LLM(), long, seconds=75.0)
+    assert "too long" in seen["user"]
+
+
+def test_fit_story_length_failure_is_none():
+    from purffle_shorts.script import fit_story_length, normalize
+
+    class Boom:
+        def complete_json(self, *a, **k):
+            raise RuntimeError("quota")
+
+    assert fit_story_length(Boom(), normalize(_story_data(_SHORT), "Hampi", "history", "en"), seconds=4.0) is None
 
 
 def test_normalize_keeps_historical_flag():

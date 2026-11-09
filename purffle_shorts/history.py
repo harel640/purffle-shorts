@@ -108,6 +108,7 @@ VIDEO_COLUMNS = {
     "resolved_place": "TEXT",      # the real place a video resolved to (for place-based de-duplication)
     "wiki_page": "TEXT",           # its Wikipedia article (canonical title): "Crystal Monastery" == "Shey Gompa"
     "lat": "REAL", "lon": "REAL",  # its coordinates: two names for one spot are the same place
+    "country": "TEXT",             # its country, for the per-country pacing rule
 }
 
 
@@ -186,6 +187,30 @@ class History:
         cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat(timespec="seconds")
         return [r["resolved_place"] for r in self._all(
             "SELECT resolved_place FROM videos WHERE resolved_place IS NOT NULL AND created_at >= ?", (cutoff,))]
+
+    def country_quota_reason(self, country: str, gap_days: int = 0, week_max: int = 0) -> str:
+        """Why another video about ``country`` would come too soon, or "". At most one per country within
+        ``gap_days`` days, and at most ``week_max`` per country within 7 days (0 = no limit). Counts every video
+        made; older rows without a country use the last part of their resolved place ("Hampi, India")."""
+        want = (country or "").strip().casefold()
+        if not want or not (gap_days or week_max):
+            return ""
+        now = datetime.now(timezone.utc)
+        horizon = max(gap_days, 7 if week_max else 0)
+        cutoff = (now - timedelta(days=horizon)).isoformat(timespec="seconds")
+        made: list[datetime] = []
+        for r in self._all("SELECT created_at, country, resolved_place FROM videos WHERE created_at >= ?", (cutoff,)):
+            c = r["country"] or (r["resolved_place"] or "").rsplit(",", 1)[-1]
+            if c.strip().casefold() == want:
+                try:
+                    made.append(datetime.fromisoformat(r["created_at"]))
+                except ValueError:
+                    continue
+        if gap_days and any(now - t < timedelta(days=gap_days) for t in made):
+            return f"a {country} video was made in the last {gap_days} days"
+        if week_max and sum(now - t < timedelta(days=7) for t in made) >= week_max:
+            return f"{week_max} {country} videos already this week"
+        return ""
 
     def place_recently_made(self, *, wiki_page: str = "", lat: float | None = None, lon: float | None = None,
                             place: str = "", country: str = "", days: int = PLACE_REUSE_DAYS) -> str:
