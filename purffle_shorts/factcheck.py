@@ -1,18 +1,29 @@
-"""Fact-check pass.
+"""Fact checks.
 
-After the script is written (and polished by the Script Doctor), a second LLM pass flags any
-specific number, statistic, percentage, date, ranking or superlative it cannot support, and
-rewrites those lines to keep them engaging and true WITHOUT invented stats
-(e.g. "85% of temples" -> "most temples", "2,300 temples" -> "thousands of temples").
-It never introduces a new number. Title, on-screen hook and every spoken line are checked.
-Fail-open: on any LLM error the script is returned unchanged (with a warning).
+Three layers, strictest last:
+
+``scrub`` - an LLM pass with NO source text: it rewrites numbers and superlatives it cannot support. Used only
+when a script has no source article. Fail-open.
+
+``ground`` - deterministic: every number, year and percentage in a story must appear in the source article;
+a sentence carrying one that doesn't is dropped.
+
+``verify_claims`` - claim-level: every sentence of the narration, the title, the on-screen hook and the
+description line must be SUPPORTED by a verbatim quote from the source article. One strict-schema LLM call
+proposes a verdict and a quote per sentence; the code then verifies the checker (the quote must really be in
+the source, numbers and names must be there too). Unsupported sentences are removed. Fail-CLOSED: if the
+checker cannot be asked, FactCheckUnavailable is raised and the caller skips the video.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import math
+import os
 import re
+import unicodedata
+from difflib import SequenceMatcher
 
 from .utils import clean_narration, emphasis_key, redact
 
@@ -159,3 +170,386 @@ def scrub(llm, script, settings):
     else:
         log.info("Fact check: no unsupported stats found")
     return script
+
+
+# ---------------------------------------------------------------------------------- claim-level check
+# The story writer once turned a traveller's remark ("these houses can be removed ... when there is a storm")
+# into a storm night that swept a village downstream, and "carved" a chariot "from a single block" the article
+# never mentions. Numbers were clean, so ground() passed both. verify_claims() checks every SENTENCE.
+SOURCE_FETCH_CHARS = 24000        # how much of the article is fetched; quotes are verified against all of it
+# How much of it the checker is shown. The free Groq tier allows 8,000 tokens a minute, and the request has to
+# fit inside that with the script and the instructions, so the article is cut to its most relevant passages.
+CLAIM_SOURCE_CHARS = int(os.getenv("CLAIM_SOURCE_CHARS", "14000"))
+LEAD_CHARS = 5000                 # the part of the article the writer saw: always shown to the checker
+MIN_QUOTE_WORDS = 4               # a "quote" shorter than this proves nothing
+QUOTE_RUN = 0.7                   # a quote with a slip still counts if this share of it is one verbatim run
+VERDICTS = ("supported", "unsupported", "not_factual")
+
+CLAIMS_SCHEMA = {
+    "type": "object", "additionalProperties": False,
+    "properties": {"items": {"type": "array", "items": {
+        "type": "object", "additionalProperties": False,
+        "properties": {"id": {"type": "integer"},
+                       "verdict": {"type": "string", "enum": list(VERDICTS)},
+                       "quote": {"type": "string"},
+                       "unsupported_part": {"type": "string"}},
+        "required": ["id", "verdict", "quote", "unsupported_part"]}}},
+    "required": ["items"]}
+HEADLINE_SCHEMA = {"type": "object", "additionalProperties": False,
+                   "properties": {"title": {"type": "string"}, "hook_text": {"type": "string"}},
+                   "required": ["title", "hook_text"]}
+
+CLAIMS_SYSTEM = ("You are a strict fact-checker. You compare sentences with a SOURCE text and reply only with "
+                 "strict JSON. You never use your own knowledge: only what the SOURCE states counts.")
+_CLAIMS_RULES = (
+    "For EACH numbered item decide ONE verdict:\n"
+    "- supported: EVERY factual part of the item is stated in the SOURCE. Judge the FACTS, not the wording: "
+    "a plain restatement in other words is supported (\"destroyed the city\" ~ \"wiped out the city\"; "
+    "\"an enslaved Parisian goldsmith ... design the Silver Tree\" ~ \"a Parisian goldsmith made a silver "
+    "tree\"), and so is a shorter summary that leaves details out. Copy into \"quote\" the passage of the "
+    "SOURCE that states it, character for character, at most 30 words. If the facts sit in two different "
+    "passages, copy both, separated by \" ... \".\n"
+    "- unsupported: the item states an event, action, cause, date, person, quantity, material, method or "
+    "superlative that the SOURCE does not state. Put the unsupported words in \"unsupported_part\". These are "
+    "unsupported: turning something that CAN happen into something that DID happen; turning \"some\" or \"a "
+    "few\" into \"many\" or \"thousands\"; turning a description into a dramatic event; adding weather, "
+    "emotions, motives, materials or methods the SOURCE does not mention; anything true that you know from "
+    "elsewhere but the SOURCE does not say.\n"
+    "- not_factual: the item asserts nothing checkable - a question to the viewer, direct address, or a "
+    "transition (\"Here is what happened next.\").\n"
+    "If only part of an item is supported, the verdict is unsupported. \"quote\" is empty unless the verdict is "
+    "supported. Return every id exactly once.\n")
+
+_STOP = frozenset("""a an and are as at be been but by can could did do does for from had has have he her his
+how if in into is it its just like may more most much no not of on one only or our out over she so some such
+than that the their them then there these they this those through to under up very was were what when where
+which while who whom why will with would you your about after again all also any because before being between
+both each ever every here once still upon today now even ever away back down around across along""".split())
+# Capitalised words that are not names to be found in the source.
+_NOT_NAMES = frozenset("""i earth asia asian europe european north south east west northern southern eastern
+western god""".split())
+_WORD_RE = re.compile(r"[^\W\d_][\w'’\-‑]*", re.UNICODE)
+_ELLIPSIS_RE = re.compile(r"\s*(?:\.\.\.|…|\[\.\.\.\]|\[…\])\s*")
+
+
+class FactCheckUnavailable(RuntimeError):
+    """The claim checker could not be asked (every LLM provider failed, or its reply was unusable)."""
+
+
+class NothingSupported(RuntimeError):
+    """The story has no supported narration left, or its title/hook cannot be supported by the source.
+    ``report`` holds the verdicts that led to it."""
+
+    def __init__(self, message: str, report: dict | None = None):
+        super().__init__(message)
+        self.report = report or {}
+
+
+def _norm(text: str) -> str:
+    """Lower-case, accents folded, punctuation as spaces, single-spaced: what 'the same words' means here."""
+    t = unicodedata.normalize("NFKD", text or "")
+    t = "".join(c for c in t if not unicodedata.combining(c)).lower()
+    t = re.sub(r"[^\w\s]|_", " ", t)
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def quote_in_source(quote: str, source_norm: str) -> bool:
+    """True if ``quote`` really is a passage of the source: every piece of it (pieces are split at '...')
+    appears there, and together they are at least MIN_QUOTE_WORDS long. A piece counts when it is word for
+    word in the source, or - models miscopy a word now and then ("located on one of the most important
+    medieval paths" for "situated on ...") - when QUOTE_RUN of its words form ONE unbroken run of the source,
+    at least MIN_QUOTE_WORDS long. A made-up quote shares no such run with the article."""
+    parts = [_norm(p) for p in _ELLIPSIS_RE.split(quote or "")]
+    parts = [p for p in parts if p]
+    if not parts or sum(len(p.split()) for p in parts) < MIN_QUOTE_WORDS:
+        return False
+    padded = f" {source_norm} "
+    source_words: list[str] | None = None
+    for p in parts:
+        if f" {p} " in padded:
+            continue
+        words = p.split()
+        if len(words) < MIN_QUOTE_WORDS:
+            return False
+        if source_words is None:
+            source_words = source_norm.split()
+        run = SequenceMatcher(None, source_words, words, autojunk=False).find_longest_match(
+            0, len(source_words), 0, len(words)).size
+        if run < max(MIN_QUOTE_WORDS, math.ceil(QUOTE_RUN * len(words))):
+            return False
+    return True
+
+
+def _unsupported_numbers(text: str, source_digits: str) -> list[str]:
+    return [m.group(0) for m in _FACT_RE.finditer(_collapse(text))
+            if not _supported(m.group(0).lower(), source_digits)]
+
+
+def _names(sentence: str, allow: frozenset[str]) -> list[str]:
+    """Capitalised words that are names (people, peoples, places, dynasties): every capitalised word except the
+    first of the sentence, common non-names, and the words of the place itself (``allow``, normalised)."""
+    out: list[str] = []
+    for k, m in enumerate(_WORD_RE.finditer(sentence)):
+        w = m.group(0)
+        if k == 0 or not w[0].isupper():
+            continue
+        key = _norm(re.sub(r"['’]s$", "", w))
+        if key and key not in _NOT_NAMES and key not in allow and key not in out:
+            out.append(key)
+    return out
+
+
+def _name_in_source(name: str, source_norm: str) -> bool:
+    """A name counts as found when the source has a word starting the same way ("Mongols" ~ "Mongol",
+    "Chinese" ~ "China", "Portuguese" ~ "Portugal")."""
+    words = name.split()
+    return all(re.search(rf"\b{re.escape(w[:max(4, len(w) - 4)])}", source_norm) for w in words)
+
+
+def _missing_names(sentence: str, source_norm: str, allow: frozenset[str]) -> list[str]:
+    return [n for n in _names(sentence, allow) if not _name_in_source(n, source_norm)]
+
+
+def _content_words(text: str) -> list[str]:
+    return [w for w in _norm(text).split() if len(w) > 3 and w not in _STOP]
+
+
+def _overlap(sentence: str, quote: str) -> float | None:
+    """Share of the sentence's content words that the quote also has (by 5-letter stem). Logged, not enforced:
+    it shows how loosely a 'supported' sentence paraphrases its quote."""
+    words = _content_words(sentence)
+    if not words or not quote:
+        return None
+    stems = {w[:5] for w in _content_words(quote)}
+    return round(sum(w[:5] in stems for w in words) / len(words), 2)
+
+
+def select_source(source: str, script_text: str, budget: int = 0) -> str:
+    """The part of the article shown to the checker. Short articles go whole. A long one keeps its lead (what
+    the writer saw) plus the later paragraphs that share the most words with the script, in article order."""
+    budget = budget or CLAIM_SOURCE_CHARS
+    source = (source or "").strip()
+    if len(source) <= budget:
+        return source
+    paras = [p for p in re.split(r"\n+", source) if p.strip()]
+    wanted = set(_content_words(script_text))
+    keep: set[int] = set()
+    used = 0
+    for i, p in enumerate(paras):                      # the lead, in order
+        if used + len(p) > min(LEAD_CHARS, budget):
+            break
+        keep.add(i)
+        used += len(p) + 1
+    rest = [i for i in range(len(paras)) if i not in keep]
+    rest.sort(key=lambda i: -(len(wanted & set(_content_words(paras[i]))) / (1 + len(paras[i]) / 600)))
+    for i in rest:
+        if used + len(paras[i]) + 1 <= budget:
+            keep.add(i)
+            used += len(paras[i]) + 1
+    return "\n".join(paras[i] for i in sorted(keep)) or source[:budget]
+
+
+def claim_items(script, kinds: tuple[str, ...] = ("title", "hook", "description", "narration")) -> list[dict]:
+    """Everything the viewer is told, as numbered items: title, on-screen hook, the description's first
+    sentence, and each sentence of the narration (with its scene and position)."""
+    items: list[dict] = []
+
+    def add(kind: str, text: str, **extra) -> None:
+        text = (text or "").strip()
+        if text and kind in kinds:
+            items.append({"id": len(items), "kind": kind, "text": text, **extra})
+
+    add("title", script.title)
+    add("hook", script.hook_text)
+    add("description", _SENT_SPLIT.split((script.description or "").strip(), maxsplit=1)[0])
+    for si, sc in enumerate(script.scenes):
+        for k, sent in enumerate(_SENT_SPLIT.split((sc.narration or "").strip())):
+            add("narration", sent, scene=si, pos=k)
+    return items
+
+
+def _ask(llm, items: list[dict], shown: str) -> dict[int, dict]:
+    user = ("SOURCE (the only evidence that counts):\n<<<\n" + shown + "\n>>>\n\n" + _CLAIMS_RULES
+            + 'Reply with JSON {"items": [{"id": <int>, "verdict": "supported|unsupported|not_factual", '
+              '"quote": "...", "unsupported_part": "..."}]}.\n\nITEMS:\n'
+            + json.dumps([{"id": it["id"], "text": it["text"]} for it in items], ensure_ascii=False))
+    try:
+        data = llm.complete_json(CLAIMS_SYSTEM, user, CLAIMS_SCHEMA, max_tokens=6000, temperature=0.0)
+    except Exception as e:  # noqa: BLE001
+        raise FactCheckUnavailable(f"the claim checker could not be asked ({redact(e)})") from e
+    rows = data.get("items") if isinstance(data, dict) else None
+    if not isinstance(rows, list) or not rows:
+        raise FactCheckUnavailable("the claim checker's reply had no verdicts")
+    out: dict[int, dict] = {}
+    for r in rows:
+        if isinstance(r, dict):
+            try:
+                out[int(r.get("id"))] = r
+            except (TypeError, ValueError):
+                continue
+    return out
+
+
+def _judge(item: dict, reply: dict | None, source_norm: str, source_digits: str, allow: frozenset[str]) -> dict:
+    """The final verdict for one item: the checker's answer, then verified - the checker is not trusted."""
+    text, kind = item["text"], item["kind"]
+    said = str((reply or {}).get("verdict", "")).strip().lower()
+    quote = str((reply or {}).get("quote", "")).strip()
+    row = {**item, "llm_verdict": said or "missing", "quote": quote, "verdict": "unsupported", "reason": "",
+           "overlap": None}
+    sentence = kind in ("narration", "description")       # titles and hooks are title-cased: names not checked
+    numbers = _unsupported_numbers(text, source_digits)
+    if said not in VERDICTS:
+        row["reason"] = "the checker gave no verdict for it"
+    elif said == "unsupported":
+        row["reason"] = str((reply or {}).get("unsupported_part", "")).strip() or "not stated in the source"
+    elif said == "supported":
+        missing = _missing_names(text, source_norm, allow) if sentence else []
+        if not quote_in_source(quote, source_norm):
+            row["reason"] = "the checker's quote is not in the source"
+        elif numbers:
+            row["reason"] = f"number not in the source: {', '.join(numbers)}"
+        elif missing:
+            row["reason"] = f"name not in the source: {', '.join(missing)}"
+        else:
+            row["verdict"], row["overlap"] = "supported", _overlap(text, quote)
+    else:                                                  # not_factual: allowed only if it really asserts nothing
+        names = _names(text, allow) if sentence else []
+        if numbers:
+            row["reason"] = f"called not factual but states a number not in the source: {', '.join(numbers)}"
+        elif text.rstrip().endswith("?"):                  # a question may name what the source names
+            missing = [n for n in names if not _name_in_source(n, source_norm)]
+            if missing:
+                row["reason"] = f"name not in the source: {', '.join(missing)}"
+            else:
+                row["verdict"] = "not_factual"
+        elif names or re.search(r"\d", text):
+            row["reason"] = "called not factual but states names or numbers without a quote"
+        else:
+            row["verdict"] = "not_factual"
+    return row
+
+
+def _rewrite_headline(llm, script, quotes: list[str], which: list[str], title_len: int) -> dict:
+    """ONE rewrite of an unsupported title / on-screen hook from the supported quotes only."""
+    user = (
+        "The " + " and the ".join("on-screen hook_text" if w == "hook" else w for w in which) + " of this "
+        "YouTube Short state something the source article does not. Rewrite so each states ONLY what the QUOTES "
+        "below state - concrete stakes (who or what, and what was won or lost). Use a number, date or "
+        "superlative only if a quote contains it. Never vague mystery words (mystery, secret, hidden, legend, "
+        "forgotten, untold). Do NOT add any fact that is not in the quotes. "
+        f"title: max {title_len} characters, no place name, no hashtags, no quotes. hook_text: max 6 words. "
+        "Return both, unchanged if one of them was not named above.\n\n"
+        f"Current title: {script.title}\nCurrent hook_text: {script.hook_text}\n\nQUOTES from the source:\n"
+        + "\n".join(f"- {q}" for q in quotes[:14]))
+    d = llm.complete_json("You are a careful YouTube Shorts editor. Reply with strict JSON.", user,
+                          HEADLINE_SCHEMA, max_tokens=1500, temperature=0.2)
+    return d if isinstance(d, dict) else {}
+
+
+def _tidy(text: str, limit: int) -> str:
+    text = re.sub(r"[<>\"“”]", "", text or "").strip(" '-:")
+    return text if len(text) <= limit else text[:limit].rsplit(" ", 1)[0].rstrip(" ,;:-")
+
+
+def verify_claims(llm, script, source_text: str, *, place_words: str = "",
+                  kinds: tuple[str, ...] = ("title", "hook", "description", "narration"),
+                  title_len: int = 60, strict: bool = True):
+    """Claim-level fact check against the source article. Returns ``(script, report)``; mutates the script.
+
+    Every unsupported narration sentence is removed (a scene left empty goes with it). An unsupported
+    description line is cleared (the pipeline then writes a plain one). An unsupported title or hook gets ONE
+    rewrite from the supported quotes and is checked again.
+
+    Raises FactCheckUnavailable when the checker cannot be asked, and - when ``strict`` - NothingSupported when
+    no narration survives or the title/hook still cannot be supported. With ``strict=False`` (the user chose
+    the topic) an unsupportable title/hook is kept with a warning."""
+    source = (source_text or "").strip()
+    if not source:
+        raise FactCheckUnavailable("no source article to check the story against")
+    items = claim_items(script, kinds)
+    if not items:
+        raise NothingSupported("the script has nothing to check")
+    source_norm = _norm(source)
+    source_digits = _collapse(source.replace(",", "").lower())
+    allow = frozenset(_norm(" ".join([place_words, script.topic or ""])).split())
+    shown = select_source(source, " ".join(it["text"] for it in items))
+
+    def judge(batch: list[dict]) -> list[dict]:
+        replies = _ask(llm, batch, shown)
+        return [_judge(it, replies.get(it["id"]), source_norm, source_digits, allow) for it in batch]
+
+    rows = judge(items)
+
+    def report() -> dict:
+        """The verdicts so far, logged: one summary line and one line per dropped item."""
+        counts = {v: sum(r["verdict"] == v for r in rows) for v in VERDICTS}
+        overlaps = [r["overlap"] for r in rows if r["overlap"] is not None]
+        log.info("Claim check: %d supported, %d dropped, %d not factual", counts["supported"],
+                 counts["unsupported"], counts["not_factual"])
+        for r in rows:
+            if r["verdict"] == "unsupported":
+                log.info("  dropped (%s): %s -- %s", r["kind"], r["text"][:90], r["reason"][:80])
+        return {"source_chars": len(source), "shown_chars": len(shown), "counts": counts,
+                "mean_overlap": round(sum(overlaps) / len(overlaps), 2) if overlaps else None, "items": rows}
+
+    by_kind = {k: [r for r in rows if r["kind"] == k] for k in ("title", "hook", "description", "narration")}
+
+    # -- narration: drop every unsupported sentence
+    bad = {(r["scene"], r["pos"]) for r in by_kind["narration"] if r["verdict"] == "unsupported"}
+    if bad:
+        kept = []
+        for si, sc in enumerate(script.scenes):
+            sents = [s for s in _SENT_SPLIT.split((sc.narration or "").strip()) if s.strip()]
+            keep = [s for k, s in enumerate(sents) if (si, k) not in bad]
+            new = clean_narration(" ".join(keep).strip())
+            if new:
+                if new != sc.narration:
+                    sc.narration = new
+                    _prune_emphasis(sc)
+                kept.append(sc)
+        script.scenes = kept
+    if "narration" in kinds and not script.scenes:
+        raise NothingSupported("no sentence of the narration is supported by the source", report())
+
+    # -- description line: a statement about the video, so it must be SUPPORTED (a checker that waves it
+    # through as "not factual" is not believed). Otherwise it is cleared and the pipeline writes
+    # "The story of <place>, <country>."
+    for r in by_kind["description"]:
+        if r["verdict"] != "supported":
+            if r["verdict"] == "not_factual":
+                r["verdict"], r["reason"] = "unsupported", "a description must be supported by a quote"
+            script.description = ""
+
+    # -- title / hook: one rewrite from the supported quotes, then checked again
+    which = [k for k in ("title", "hook") if any(r["verdict"] == "unsupported" for r in by_kind[k])]
+    if which:
+        quotes = list(dict.fromkeys(r["quote"] for r in rows if r["verdict"] == "supported" and r["quote"]))
+        fixed = False
+        if not quotes:
+            log.info("Claim check: nothing in the story is supported, so the %s cannot be rewritten",
+                     " and ".join(which))
+        if quotes:
+            try:
+                new = _rewrite_headline(llm, script, quotes, which, title_len)
+            except Exception as e:  # noqa: BLE001
+                log.warning("Claim check: title/hook rewrite failed (%s)", redact(e))
+                new = {}
+            cand = {"title": _tidy(str(new.get("title", "")), 60), "hook": _tidy(str(new.get("hook_text", "")), 48)}
+            if all(cand[k] for k in which):
+                again = [{"id": i, "kind": k, "text": cand[k]} for i, k in enumerate(which)]
+                rechecked = judge(again)
+                if all(r["verdict"] != "unsupported" for r in rechecked):
+                    for r in rechecked:
+                        setattr(script, "title" if r["kind"] == "title" else "hook_text", r["text"])
+                        r["id"], r["rewritten"] = len(rows), True
+                        rows.append(r)
+                    fixed = True
+        if not fixed:
+            what = " and ".join("on-screen hook" if k == "hook" else k for k in which)
+            if strict:
+                raise NothingSupported(f"the {what} could not be supported by the source", report())
+            log.warning("Claim check: the %s is not supported by the source; kept (the topic was chosen by hand)",
+                        what)
+
+    return script, report()

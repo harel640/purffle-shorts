@@ -337,7 +337,14 @@ def build_prompt(subject: str, style: str, settings: Settings, avoid: list[str],
     if story and context:
         ctx += ("Ground the story in that background ONLY: every factual claim — names, dates, numbers, events — "
                 "must come from it. If a detail is a tradition or legend not stated there, say \"legend says\" "
-                "or leave it out. Never invent a fact.\n\n")
+                "or leave it out. Never invent a fact.\n"
+                "EVERY sentence of the narration, the title and the hook are checked against that background "
+                "afterwards, and a sentence that states anything it does not is DELETED. So build each sentence "
+                "on one passage of the background and say only what that passage says, in your own plain words. "
+                "Do NOT add weather, sounds, light, smells, feelings, motives, crowds, materials, tools or "
+                "methods the background does not state. Do NOT turn something that \"can\" or \"may\" happen "
+                "into something that did, or \"some\" into \"thousands\". The drama must come from the real "
+                "facts: pick the most striking ones and tell them plainly.\n\n")
     ins = f"{insights.strip()}\n\n" if insights else ""
     ins += f"{keywords.strip()}\n\n" if keywords else ""
     user = f"""Write one YouTube Short.
@@ -543,10 +550,11 @@ def write_script(llm, subject: str, settings: Settings, *, source: str = "niche"
 
 
 def fit_story_length(llm, script: Script, seconds: float, lo: float = HISTORY_RANGE[0],
-                     hi: float = HISTORY_RANGE[1]) -> Script | None:
+                     hi: float = HISTORY_RANGE[1], source: str = "") -> Script | None:
     """ONE rewrite of a story script whose voice-over ran ``seconds`` (outside ``lo``-``hi``): expanded or
     trimmed to the number of words that fills the middle of the window at the voice's REAL speaking rate.
-    Same title, hook, scenes, facts. None if the rewrite failed (the caller then skips the video)."""
+    Same title, hook, scenes, facts. An expansion may add only facts stated in ``source`` (the article the
+    story is grounded in). None if the rewrite failed (the caller then skips the video)."""
     n = word_count(script.narration, script.language)
     if not n or seconds <= 0:
         return None
@@ -557,25 +565,33 @@ def fit_story_length(llm, script: Script, seconds: float, lo: float = HISTORY_RA
              lo_w, hi_w)
     try:
         return _resize_story(llm, script, script.topic, lo_w, hi_w,
-                             f"{verb} (~{n} words, {seconds:.0f}s spoken; it must run {lo:g}-{hi:g}s)")
+                             f"{verb} (~{n} words, {seconds:.0f}s spoken; it must run {lo:g}-{hi:g}s)", source)
     except Exception as e:  # noqa: BLE001
         log.warning("Length rewrite failed (%s)", e)
         return None
 
 
-def _resize_story(llm, script: Script, subject: str, lo_words: int, hi_words: int, why: str) -> Script:
+def _resize_story(llm, script: Script, subject: str, lo_words: int, hi_words: int, why: str,
+                  source: str = "") -> Script:
     """One targeted rewrite of the narration's LENGTH only, preserving title, hook, scene order, each
-    scene's search_query/image_prompt/historical flag, and every stated fact (no invented specifics)."""
+    scene's search_query/image_prompt/historical flag, and every stated fact (no invented specifics). To get
+    longer it may only add facts stated in ``source``: "vivid detail" used to be asked for here, and with no
+    source to draw on the model made it up."""
+    grow = ("expand ONLY with facts stated in the SOURCE below (more of what happened, who, when, how big), "
+            "in plain words" if source else
+            "expand by telling what the draft already states more fully, adding no new facts")
     system = ("You are a top YouTube Shorts scriptwriter and editor. You reply with a single JSON object "
               "and nothing else.")
     user = (
         f"This {script.style} Short script is {why}. Rewrite the NARRATION of the scenes so the whole script "
-        f"is BETWEEN {lo_words} and {hi_words} words - expand with vivid, period-accurate detail, or cut "
+        f"is BETWEEN {lo_words} and {hi_words} words - {grow}, or cut "
         f"repetition and side details, as needed. Keep the SAME title, hook_text, the SAME number of scenes and "
         f"their order, and each scene's search_query, image_prompt and historical flag unchanged. Do NOT invent "
-        f"names, dates, numbers or events that are not already in the draft. Keep the ending as ONE short, "
+        f"names, dates, numbers, events, weather, feelings or motives: every sentence is checked against the "
+        f"source afterwards and an unsupported one is deleted. Keep the ending as ONE short, "
         f"open question to the viewer. Reply with the same JSON shape.\n\n"
-        f"Draft:\n{json.dumps(script.to_dict(), ensure_ascii=False)}")
+        f"Draft:\n{json.dumps(script.to_dict(), ensure_ascii=False)}"
+        + (f"\n\nSOURCE:\n{source}" if source else ""))
     data = llm.complete_json(system, user, SCRIPT_SCHEMA, max_tokens=12000)
     merged = script.to_dict()                       # keep tags, hashtags, description, category, topic
     if data.get("scenes"):
@@ -589,7 +605,9 @@ def _resize_story(llm, script: Script, subject: str, lo_words: int, hi_words: in
 # Week-1: titles with concrete stakes held viewers ("one of history's richest cities vanished in months");
 # vague mystery words did not ("mystery?", "echoes today", "vanished overnight?").
 STAKES_RULE = ("  It must state CONCRETE STAKES from the story - who or what, and what was won or lost, with a "
-               "number, date or superlative (e.g. \"One of history's richest cities vanished in months\"). Never "
+               "number, date or superlative TAKEN FROM THE BACKGROUND (e.g. \"One of history's richest cities "
+               "vanished in months\"). If the background gives none, state the stakes without one - never make "
+               "one up: the title is checked against the background and an unsupported one is rejected. Never "
                "vague mystery words: mystery, secret, hidden, echoes, whispers, untold, forgotten, legend, "
                "\"vanished overnight?\", \"what happened?\".")
 _VAGUE_RE = re.compile(r"\b(myster(?:y|ies|ious)|secrets?|secretly|hidden|echo(?:es|ing)?|whisper\w*|untold|"
@@ -635,7 +653,8 @@ def ensure_concrete_hook(llm, script: Script, place_title: bool = False) -> Scri
     user = (
         "Rewrite the title, on-screen hook_text and spoken opening of this YouTube Short so each states "
         "CONCRETE STAKES taken from the narration below - who or what, and what was won or lost, with a "
-        "number, date or superlative it states (e.g. \"One of history's richest cities vanished in months\"). "
+        "number, date or superlative it states (e.g. \"One of history's richest cities vanished in months\"); "
+        "if the narration states none, give the stakes without one. "
         "Never vague mystery words: mystery, secret, hidden, echoes, whispers, untold, forgotten, legend, "
         "unknown, \"vanished overnight\", \"what happened\". Do NOT invent facts. "
         f"title: max {title_len} characters" + (", without the place name" if place_title else "") + ". "
@@ -783,6 +802,14 @@ def _score_of(data: dict) -> tuple[int | None, dict[str, int]]:
     return score, clean
 
 
+# The Script Doctor rewrites without seeing the source article, and "make vague lines concrete" used to be
+# answered with invented detail. A true story is afterwards checked sentence by sentence (factcheck).
+_TRUE_STORY_RULE = ("- This is a TRUE story. Every sentence is checked against its source article afterwards and "
+                    "one that states anything new is deleted. Do NOT add any name, date, number, event, weather, "
+                    "sound, feeling, motive, material or method that the draft does not already state. Sharpen "
+                    "it by choosing, ordering and wording what is there.\n")
+
+
 def review_prompt(script: Script, settings: Settings, rewrite: bool, checks: list[str] | None = None) -> tuple[str, str]:
     words, n_scenes = scene_plan(script.style, settings.target_seconds)
     lang = LANGUAGES.get(script.language, script.language)
@@ -796,7 +823,7 @@ the same JSON structure and about {words} words in about {n_scenes} scenes. Fix 
 automatic finding: sharpen the hook, cut filler, make vague lines concrete, remove any claim that may not be true,
 keep the payoff for the end, end with a short call to action. Put the rewritten script in "script".
 Format rules to keep:
-{_format_rules(script.style)}""" if rewrite else 'Return only "rubric" and "issues".')
+{_format_rules(script.style)}{_TRUE_STORY_RULE if script.style in STORY_STYLES else ""}""" if rewrite else 'Return only "rubric" and "issues".')
     user = f"""Review this YouTube Short script ({STYLES[script.style]}).
 
 {json.dumps(draft, ensure_ascii=False, indent=1)}

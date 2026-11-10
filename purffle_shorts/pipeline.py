@@ -246,16 +246,25 @@ def grounding_article(pick: Topic, lang: str = "en") -> tuple[str, str]:
     """(text, url) of the Wikipedia article a story is grounded in. A listed place names its exact article,
     which is looked up by that title, never searched for (a search once turned "Ban Rak Thai" into a political
     party's article); if it is missing the topic is skipped rather than grounded in a guess. The article's
-    canonical title and coordinates are kept on ``pick``. Other topics use the best search match."""
+    canonical title and coordinates are kept on ``pick``. Other topics use the best search match.
+
+    The writer is given the first WRITER_SOURCE_CHARS of the article (returned); more of it is kept on
+    ``pick.source_full`` for the claim check, so a true statement from a later section is not thrown out."""
     if not pick.wiki_title:
-        return topics.article(pick.subject, lang)
-    page = topics.article_page(pick.wiki_title, lang)
-    if not page:
-        raise SkipTopic(f"Wikipedia article {pick.wiki_title!r} for this listed place not found")
-    pick.wiki_title = page["title"]
-    if pick.lat is None and page["lat"] is not None:
-        pick.lat, pick.lon = page["lat"], page["lon"]
-    return page["text"], page["url"]
+        text, url = topics.article(pick.subject, lang, max_chars=factcheck.SOURCE_FETCH_CHARS)
+    else:
+        page = topics.article_page(pick.wiki_title, lang, max_chars=factcheck.SOURCE_FETCH_CHARS)
+        if not page:
+            raise SkipTopic(f"Wikipedia article {pick.wiki_title!r} for this listed place not found")
+        pick.wiki_title = page["title"]
+        if pick.lat is None and page["lat"] is not None:
+            pick.lat, pick.lon = page["lat"], page["lon"]
+        text, url = page["text"], page["url"]
+    pick.source_full = text
+    return text[:WRITER_SOURCE_CHARS], url
+
+
+WRITER_SOURCE_CHARS = 5000          # how much of the article the script writer reads
 
 
 EXPLICIT_SOURCES = ("manual", "script", "clip", "url", "document")   # the user chose the topic: never blocked
@@ -440,16 +449,58 @@ class Studio:
                 log.warning("Voice engine '%s' failed: %s", eng, e)
         raise RuntimeError(f"All voice engines failed: {last}")
 
-    def _length_gate(self, script: Script, speech, total: float, work: Path, folder: Path, s: Settings):
+    def _claim_check(self, script: Script, pick: Topic, *, kinds: tuple[str, ...] | None = None,
+                     title_len: int = 60) -> Script:
+        """factcheck.verify_claims against the topic's article, fail CLOSED for the autopilot: if the checker
+        can't be asked, or nothing supported is left, the topic is skipped. A topic the user chose by hand
+        (EXPLICIT_SOURCES) goes on with a warning when the checker is down."""
+        explicit = pick.source in EXPLICIT_SOURCES
+        place_words = " ".join(x for x in (pick.subject, pick.place, pick.country, pick.wiki_title) if x)
+        try:
+            script, report = factcheck.verify_claims(
+                self.llm, script, pick.source_full or pick.source_text, place_words=place_words,
+                kinds=kinds or ("title", "hook", "description", "narration"), title_len=title_len,
+                strict=not explicit)
+        except factcheck.FactCheckUnavailable as e:
+            if explicit:
+                log.warning("Claim check skipped (%s); the topic was chosen by hand, continuing", redact(e))
+                return script
+            raise SkipTopic(f"fact check unavailable: {redact(e)}") from e
+        except factcheck.NothingSupported as e:
+            raise SkipTopic(f"story not supported by its source: {e}") from e
+        pick.claim_reports.append(report)
+        return script
+
+    @staticmethod
+    def _save_claims(folder: Path, pick: Topic) -> None:
+        """claims.json next to script.json: every sentence, its verdict and the quote that supports it."""
+        reports = getattr(pick, "claim_reports", None)
+        if reports:
+            (folder / "claims.json").write_text(
+                json.dumps({"source_url": getattr(pick, "source_url", ""), "checks": reports}, indent=2,
+                           ensure_ascii=False), encoding="utf-8")
+
+    def _length_gate(self, script: Script, speech, total: float, work: Path, folder: Path, s: Settings,
+                     pick: Topic | None = None):
         """Hard length gate on the MEASURED voice-over: a story Short renders only if it runs 45-60s. Otherwise
         the narration is expanded/trimmed ONCE to fit (at the voice's real speaking rate) and re-voiced; still
-        outside the window -> SkipTopic. Returns (script, speech, total)."""
+        outside the window -> SkipTopic. Returns (script, speech, total).
+
+        The rewrite is given the article and may add only what it states; the rewritten narration is then
+        checked against the article again (numbers, then every sentence), so an expansion can't smuggle in
+        an invented event. Sentences that fail are removed before the voice-over is re-measured."""
         lo, hi = HISTORY_RANGE
         if lo <= total <= hi:
             return script, speech, total
-        fixed = fit_story_length(self.llm, script, total, lo, hi) if self.llm is not None else None
+        source = (pick.source_full or pick.source_text) if pick is not None else ""
+        fixed = (fit_story_length(self.llm, script, total, lo, hi, source=source[:WRITER_SOURCE_CHARS])
+                 if self.llm is not None else None)
         if fixed is not None:
             script = fixed
+            if source and s.fact_check and pick is not None:
+                script = factcheck.ground(script, source, s)
+                script = self._claim_check(script, pick, kinds=("narration",))
+                self._save_claims(folder, pick)
             (folder / "script.json").write_text(json.dumps(script.to_dict(), indent=2, ensure_ascii=False),
                                                 encoding="utf-8")
             speech = self._speak(script, work, s)
@@ -527,13 +578,27 @@ class Studio:
             if self.llm is not None and s.script_review != "off":
                 self._step("review", "Script Doctor")
                 script = review_script(self.llm, script, s)
-            if self.llm is not None and not s.offline and s.fact_check:
-                script = factcheck.scrub(self.llm, script, s)
-                script = factcheck.ground(script, pick.source_text, s)   # drop any invented specifics
+            checking = self.llm is not None and not s.offline and s.fact_check
+            source_article = pick.source_full or pick.source_text
+            # Stories are checked claim by claim against their article. Other formats (a quiz's wrong answers,
+            # a myth that is stated in order to be debunked) keep the source-less pass.
+            claim_checked = checking and script.style in STORY_STYLES and bool(source_article)
+            if checking:
+                if (script.style in STORY_STYLES and not source_article and place_locked_channel
+                        and not user_chose_topic):
+                    # A place channel's own topics are never made on trust.
+                    raise SkipTopic("no source article to check the story against")
+                if not claim_checked:
+                    script = factcheck.scrub(self.llm, script, s)
+                script = factcheck.ground(script, source_article, s)   # drop any invented numbers
             if script.style in STORY_STYLES and self.llm is not None and not s.offline:
                 # A story's title, on-screen hook and opening line must state concrete stakes, not a vague
                 # mystery (week-1 analytics); one rewrite if they don't.
                 script = ensure_concrete_hook(self.llm, script, place_title=place_locked_channel)
+            if claim_checked:
+                # LAST, after every rewrite: each sentence, the title and the hook must be supported by a
+                # passage of the article. Unsupported sentences are removed; fail closed.
+                script = self._claim_check(script, pick, title_len=40 if place_locked_channel else 60)
             if script.style in STORY_STYLES:
                 why = recent_violence_reason(script)       # the channel never tells recent tragedies
                 if why:
@@ -626,6 +691,7 @@ class Studio:
         work.mkdir(parents=True, exist_ok=True)
         (folder / "script.json").write_text(json.dumps(script.to_dict(), indent=2, ensure_ascii=False),
                                             encoding="utf-8")
+        self._save_claims(folder, pick)
         try:
             # Place-locked visuals (Wikimedia): resolve the real place and, before spending any time,
             # run the travel-advisory check on that concrete place (not just the generic topic).
@@ -678,7 +744,7 @@ class Studio:
             speech = self._speak(script, work, s)
             total = round(speech.duration + END_PAD, 3)
             if script.style in STORY_STYLES and not s.offline and media_map is None:
-                script, speech, total = self._length_gate(script, speech, total, work, folder, s)
+                script, speech, total = self._length_gate(script, speech, total, work, folder, s, pick)
             chat = script.style == "chat"
             timeline = scene_timeline([sc.narration for sc in script.scenes], speech.words, total, s.language,
                                       starts=speech.line_starts, min_len=4.5 if chat else 1.2)
