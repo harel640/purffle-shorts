@@ -118,6 +118,11 @@ def checks(s: Settings) -> list[dict]:
             tok = Path(s.token_file).exists() or Path("token.pickle").exists()
             add(cs or tok, "YouTube OAuth client", s.client_secrets if cs else "credentials.json missing")
             add(tok if cs else None, "YouTube token", "found" if tok else "run: purffle-shorts auth")
+            from .youtube import PrivacyNotSet, require_privacy
+            try:
+                add(True, "YouTube privacy", require_privacy(s))
+            except PrivacyNotSet as e:
+                add(False, "YouTube privacy", str(e))
         from .crosspost import NAMES, routes
         others = [p for p in s.publish_to if p != "youtube"]
         direct, relay = routes(s, others)

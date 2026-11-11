@@ -34,6 +34,26 @@ class NotAuthorized(RuntimeError):
     pass
 
 
+class PrivacyNotSet(NotAuthorized):
+    """YT_PRIVACY is missing or invalid - never upload (there is no safe default to fall back to)."""
+
+
+PRIVACY_VALUES = ("private", "unlisted", "public")
+
+
+def require_privacy(settings: Settings) -> str:
+    """The privacy status uploads will use. Refuses when YT_PRIVACY (or --privacy) was not set to a valid value:
+    a missing setting must never turn into a public video."""
+    p = (settings.privacy or "").strip().lower()
+    if not p:
+        raise PrivacyNotSet("YT_PRIVACY is not set - refusing to upload. Set YT_PRIVACY=private (or unlisted / "
+                            "public) in the environment or pass --privacy; there is no default.")
+    if p not in PRIVACY_VALUES:
+        raise PrivacyNotSet(f"YT_PRIVACY={settings.privacy!r} is not valid - refusing to upload. "
+                            f"Use one of {', '.join(PRIVACY_VALUES)}.")
+    return p
+
+
 class ChannelMismatch(NotAuthorized):
     """The authorized token is not for the channel REQUIRE_CHANNEL expects — never upload."""
 
@@ -212,6 +232,7 @@ def upload(settings: Settings, video: Path, body: dict) -> dict:
     from googleapiclient.errors import HttpError
     from googleapiclient.http import MediaFileUpload
 
+    require_privacy(settings)
     with _lock:  # one upload at a time; the API client is not thread-safe
         yt = service(settings, interactive=False)
         if settings.require_channel:
