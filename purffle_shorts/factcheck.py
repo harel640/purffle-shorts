@@ -220,6 +220,8 @@ _CLAIMS_RULES = (
     "Words that only praise or decorate (beautiful, vibrant, breathtaking, famous, mighty) are not facts: "
     "ignore them and judge the rest of the item. A claim about people, numbers or events is never decoration "
     "(\"visitors from every continent\" is a claim).\n"
+    "An item that describes the video (\"This short explores X\", \"A documentary about X\", \"Explore how X\") "
+    "is judged by X: supported, with a quote, if the SOURCE states X; unsupported if it does not.\n"
     "- not_factual: the item asserts nothing checkable - a question to the viewer, direct address, or a "
     "transition (\"Here is what happened next.\").\n"
     "If only part of an item is supported, the verdict is unsupported. \"quote\" is empty unless the verdict is "
