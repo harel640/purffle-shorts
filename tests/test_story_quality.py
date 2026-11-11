@@ -101,6 +101,7 @@ def test_the_history_prompt_asks_for_a_story_shape():
     _, user = build_prompt("Mogao Caves", "history", Settings(), [], context="background")
     assert "SETUP" in user and "TURNING POINT" in user and "PAYOFF" in user
     assert "encyclopedia" in user and "the site contains" in user and "At least 6 scenes" in user
+    assert "exactly what the background calls them" in user
 
 
 def test_encyclopedia_phrasing_is_found():
