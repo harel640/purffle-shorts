@@ -113,6 +113,26 @@ def test_encyclopedia_phrasing_is_found():
     assert any("encyclopedia" in i for i in issues)
 
 
+class _HookLLM:
+    def __init__(self, reply):
+        self.reply = reply
+
+    def complete_json(self, *a, **k):
+        return self.reply
+
+
+def test_the_hook_rewrite_cannot_invent_a_number():
+    from purffle_shorts.script import ensure_concrete_hook
+    s = _script("A hidden library waited in the desert.", "In 1900 Wang Yuanlu found thousands of scrolls.",
+                title="The hidden library", hook="A HIDDEN LIBRARY")
+    out = ensure_concrete_hook(_HookLLM({"title": "1900 Discovery Saved 2,000 Manuscripts",
+                                         "hook_text": "Thousands of scrolls found in 1900",
+                                         "opening": "In 1900 one man found 2,000 scrolls."}), s)
+    assert out.title == "The hidden library"                          # 2,000 is not in the narration
+    assert out.hook_text == "Thousands of scrolls found in 1900"      # 1900 is
+    assert out.scenes[0].narration == "A hidden library waited in the desert."
+
+
 # ------------------------------------------------------------------ 3b. at least 6 pictures, none over 8 s
 def test_long_scenes_are_split_at_sentence_ends():
     s = _script("One. Two two. Three three three. Four.", "Five five. Six.", "Seven seven seven. Eight.")
