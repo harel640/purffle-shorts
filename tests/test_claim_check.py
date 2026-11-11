@@ -178,6 +178,37 @@ def test_what_the_source_backs_is_kept(sentence, said, quote):
         assert 0 <= row["overlap"] <= 1                                           # logged, not enforced
 
 
+def test_a_misquote_gets_one_second_chance_and_only_one():
+    class Echo(Checker):
+        """Says 'supported' but echoes the sentence as its quote; quotes properly (or not) when asked again."""
+        def __init__(self, table, second):
+            super().__init__(table)
+            self.second, self.asks = second, 0
+
+        def complete_json(self, system, user, schema=None, **k):
+            self.asks += 1
+            if "NOTE: you called these items supported" in user:
+                asked = json.loads(user.rsplit("ITEMS:\n", 1)[1])
+                assert [it["text"] for it in asked] == [TRUE_NOORT]                 # only the misquoted item
+                return {"items": [{"id": asked[0]["id"], "verdict": "supported", "quote": self.second,
+                                   "unsupported_part": ""}]}
+            return super().complete_json(system, user, schema, **k)
+
+    table = dict(BASE)
+    table["Olivier van Noort wrote"] = ("supported", TRUE_NOORT)                     # the sentence itself, not a quote
+
+    def story():
+        return _script(["Kampong Ayer stands on stilts above the Brunei River.", TRUE_NOORT])
+    llm = Echo(table, second=NOORT)
+    out, report = factcheck.verify_claims(llm, story(), KAMPONG_AYER, place_words="Kampong Ayer")
+    assert TRUE_NOORT in out.narration and llm.asks == 2
+    row = next(r for r in report["items"] if r["text"] == TRUE_NOORT)
+    assert row["verdict"] == "supported" and row["requoted"] and row["quote"] == NOORT
+    llm = Echo(table, second="the houses were moved across the river in every storm")   # misquotes again
+    out, report = factcheck.verify_claims(llm, story(), KAMPONG_AYER, place_words="Kampong Ayer")
+    assert TRUE_NOORT not in out.narration and llm.asks == 2                         # dropped, no third ask
+
+
 def test_an_item_the_checker_skipped_counts_as_unsupported():
     sc = _script(["Kampong Ayer stands on stilts above the Brunei River.", TRUE_NOORT])
     llm = Checker(dict(BASE), skip_ids={4})                    # ids: title 0, hook 1, description 2, then sentences

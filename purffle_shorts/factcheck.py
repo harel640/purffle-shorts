@@ -396,8 +396,14 @@ def claim_items(script, kinds: tuple[str, ...] = ("title", "hook", "description"
     return items
 
 
-def _ask(llm, items: list[dict], shown: str) -> dict[int, dict]:
-    user = ("SOURCE (the only evidence that counts):\n<<<\n" + shown + "\n>>>\n\n" + _CLAIMS_RULES
+_REQUOTE_NOTE = ("NOTE: you called these items supported, but the quote you gave is not word for word in the "
+                 "SOURCE (do not repeat the item itself). Copy the supporting words exactly as they stand in the "
+                 "SOURCE - two pieces separated by \" ... \" if needed - or answer unsupported.\n")
+_BAD_QUOTE = "the checker's quote is not in the source"
+
+
+def _ask(llm, items: list[dict], shown: str, note: str = "") -> dict[int, dict]:
+    user = ("SOURCE (the only evidence that counts):\n<<<\n" + shown + "\n>>>\n\n" + _CLAIMS_RULES + note
             + 'Reply with JSON {"items": [{"id": <int>, "verdict": "supported|unsupported|not_factual", '
               '"quote": "...", "unsupported_part": "..."}]}.\n\nITEMS:\n'
             + json.dumps([{"id": it["id"], "text": it["text"]} for it in items], ensure_ascii=False))
@@ -439,7 +445,7 @@ def _judge(item: dict, reply: dict | None, source_norm: str, source_digits: str,
     elif said == "supported":
         missing = _missing_names(text, source_norm, allow) if sentence else []
         if not quote_in_source(quote, source_norm):
-            row["reason"] = f"the checker's quote is not in the source: \"{quote[:90]}\""
+            row["reason"] = f"{_BAD_QUOTE}: \"{quote[:90]}\""
         elif numbers:
             row["reason"] = f"number not in the source: {', '.join(numbers)}"
         elif missing:
@@ -539,7 +545,22 @@ def verify_claims(llm, script, source_text: str, *, place_words: str = "",
             shown = select_source(source, script_text, max(2500, _cost(shown) // 2))
             log.info("Claim check: the request was too large; retrying with %d chars of the article", len(shown))
             replies = _ask(llm, batch, shown)
-        return [_judge(it, replies.get(it["id"]), source_norm, source_digits, allow) for it in batch]
+        judged = [_judge(it, replies.get(it["id"]), source_norm, source_digits, allow) for it in batch]
+        # Second chance, once: the checker said "supported" but its quote is not in the article - often it
+        # echoed the sentence instead of quoting. That is the checker's slip, not the writer's, and it once
+        # cost a true opening line. It is asked again for those items only; a second miss stands.
+        misquoted = [r for r in judged if r["llm_verdict"] == "supported" and r["reason"].startswith(_BAD_QUOTE)]
+        if misquoted:
+            again = [{k: r[k] for k in ("id", "kind", "text", "scene", "pos") if k in r} for r in misquoted]
+            try:
+                replies = _ask(llm, again, shown, _REQUOTE_NOTE)
+            except FactCheckUnavailable as e:
+                log.info("Claim check: could not ask again about %d misquoted item(s) (%s)", len(again), e)
+            else:
+                second = {it["id"]: _judge(it, replies.get(it["id"]), source_norm, source_digits, allow)
+                          for it in again}
+                judged = [{**second[r["id"]], "requoted": True} if r["id"] in second else r for r in judged]
+        return judged
 
     rows = judge(items)
 
