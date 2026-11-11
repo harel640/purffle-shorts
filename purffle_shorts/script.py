@@ -133,6 +133,8 @@ SCORE_SCHEMA = {
 REVIEW_TEMPERATURE = 0.2  # grading should be repeatable; writing stays creative
 
 WORDS_PER_SECOND = 2.6
+STORY_VOICE_WPS = 2.3      # the story narrator's measured pace (2.1-2.5 words a second over ten voice-overs)
+MIN_RATE_WORDS = 60        # below this a voice-over is too short to measure the pace from
 
 
 @dataclass
@@ -560,11 +562,16 @@ def fit_story_length(llm, script: Script, seconds: float, lo: float = HISTORY_RA
     if not n or seconds <= 0:
         return None
     rate = n / seconds                                          # words per second, as actually spoken
+    if n < MIN_RATE_WORDS:
+        # A script the claim check cut down to a few words says little about the voice's pace: 19 words in
+        # 7.2s gave 2.64 w/s, the rewrite was sized for that, and the 142-word result ran 63s. Use the
+        # narrator's usual pace instead.
+        rate = STORY_VOICE_WPS
     lo_w, hi_w = int(rate * (lo + 2)), int(rate * (hi - 2))     # a little inside the window
     if seconds < lo and source:
-        # What is added is checked against the source afterwards and some of it is deleted again: aim for the
-        # upper part of the window so the video still fits after that.
-        lo_w = int(rate * (lo + 7))
+        # What is added is checked against the source afterwards and some of it may be deleted again, and the
+        # pace varies by a few percent: aim for the middle of the window.
+        lo_w, hi_w = int(rate * (lo + 5)), int(rate * (hi - 5))
     verb = "too short" if seconds < lo else "too long"
     log.info("Voice-over is %.1fs (%s for %g-%gs); rewriting once to %d-%d words", seconds, verb, lo, hi,
              lo_w, hi_w)

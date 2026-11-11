@@ -30,8 +30,16 @@ GROQ_RATE_LIMIT_RETRIES = 3
 # large") a request it sizes above that. Its open-weight reasoning models (openai/gpt-oss-*) spend thousands of
 # hidden reasoning tokens per reply - 2,926 for one script - which count against the same limit and against
 # max_tokens ("max completion tokens reached before generating a valid document"). ``effort="low"`` asks for
-# short reasoning; it is used for checking tasks and for the one retry after a 413.
-GROQ_TOO_LARGE_RETRY_TOKENS = 4000
+# short reasoning; it is used for checking tasks, and for the one retry after a 413 when little room is left.
+GROQ_TPM_LIMIT = int(os.getenv("GROQ_TPM_LIMIT", "8000"))
+
+
+def _fitting_reply_tokens(system: str, user: str, limit: int = 0) -> int:
+    """The largest max_tokens with which a Groq request is sure to be accepted: Groq sizes a request whose
+    max_tokens fits as prompt + max_tokens. The prompt is estimated generously (3.4 characters a token; the
+    story writer's 11,226 characters were 3,085 tokens)."""
+    prompt = int((len(system) + len(user)) / 3.4) + 150
+    return (limit or GROQ_TPM_LIMIT) - prompt - 200
 
 
 def _is_too_large(error: Exception) -> bool:
@@ -484,13 +492,18 @@ class LLM:
 
             takes_effort = getattr(p, "takes_effort", lambda: False)()
 
-            def _call(p=p, small=i in shrunk, takes_effort=takes_effort):
+            # After a "request too large": a reply budget that is sure to fit. The model keeps its normal
+            # reasoning when that leaves it room (a script written with low effort came out mostly invented);
+            # only a tight budget asks for short reasoning.
+            fit = min(max_tokens, _fitting_reply_tokens(system, user)) if i in shrunk else max_tokens
+            small_effort = "low" if i in shrunk and fit < 3800 else effort
+
+            def _call(p=p, fit=fit, small_effort=small_effort, takes_effort=takes_effort):
                 t0 = time.time()
-                extra = {"effort": "low" if small else effort} if (small or effort) and takes_effort else {}
+                extra = {"effort": small_effort} if small_effort and takes_effort else {}
                 try:
                     text = p.complete(system, user, schema=schema if schema is not None else {},
-                                      max_tokens=min(max_tokens, GROQ_TOO_LARGE_RETRY_TOKENS) if small else max_tokens,
-                                      temperature=temp, **extra)
+                                      max_tokens=fit, temperature=temp, **extra)
                 except Exception as e:
                     self.note_failure(p.name, e)
                     raise
@@ -513,10 +526,11 @@ class LLM:
                     continue
                 # Groq sized the request above its per-minute limit: ask once more for a short reply with
                 # short reasoning, which it sizes as prompt + max_tokens.
-                if p.name == "groq" and _is_too_large(e) and i not in shrunk and takes_effort:
+                if (p.name == "groq" and _is_too_large(e) and i not in shrunk
+                        and _fitting_reply_tokens(system, user) >= 1500):
                     shrunk.add(i)
-                    log.warning("Groq refused the request as too large; retrying once with a %d-token reply "
-                                "and low reasoning effort", min(max_tokens, GROQ_TOO_LARGE_RETRY_TOKENS))
+                    log.warning("Groq refused the request as too large; retrying once with a %d-token reply",
+                                min(max_tokens, _fitting_reply_tokens(system, user)))
                     continue
                 # The Groq backup gets per-minute rate-limited on the free tier: that clears within a minute,
                 # so wait 60s and retry (up to 3 times) instead of skipping the video.

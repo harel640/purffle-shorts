@@ -405,9 +405,14 @@ def test_length_rewrite_prompt_takes_facts_from_the_source_not_from_imagination(
     assert "vivid" not in seen["user"]
     fit_story_length(LLM(), sc, seconds=4.0)                     # no article: nothing new may be added at all
     assert "adding no new facts" in seen["user"] and "vivid" not in seen["user"]
-    words = len(sc.narration.split())
+    from purffle_shorts.script import STORY_VOICE_WPS
     fit_story_length(LLM(), sc, seconds=4.0, source=KAMPONG_AYER)
-    assert f"BETWEEN {int(words / 4.0 * 52)} and {int(words / 4.0 * 58)} words" in seen["user"]   # aims high
+    # 9 words say nothing about the pace: the narrator's usual 2.3 w/s, aimed at 50-55 s
+    assert f"BETWEEN {int(STORY_VOICE_WPS * 50)} and {int(STORY_VOICE_WPS * 55)} words" in seen["user"]
+    long_sc = _script([TRUE_NOORT] * 4)
+    n = len(long_sc.narration.split())                       # ~100 words spoken in 40 s: its own pace
+    fit_story_length(LLM(), long_sc, seconds=40.0, source=KAMPONG_AYER)
+    assert n >= 60 and f"BETWEEN {int(n / 40.0 * 50)} and {int(n / 40.0 * 55)} words" in seen["user"]
     fit_story_length(LLM(), sc, seconds=90.0, source=KAMPONG_AYER)               # too long: cut, don't reword
     assert "DELETING whole sentences" in seen["user"] and "Do NOT reword" in seen["user"]
 
@@ -542,7 +547,11 @@ def test_a_request_groq_calls_too_large_is_retried_once_small_with_low_effort(mo
     assert _client(groq, monkeypatch=monkeypatch).complete_json("s", "u", max_tokens=12000) == {"ok": True}
     assert len(groq.seen) == 2
     assert groq.seen[0]["max_tokens"] == 12000 and "effort" not in groq.seen[0]
-    assert groq.seen[1]["max_tokens"] == 4000 and groq.seen[1]["effort"] == "low"
+    assert groq.seen[1]["max_tokens"] == 8000 - int(2 / 3.4) - 150 - 200 and "effort" not in groq.seen[1]
+    big = "x" * 15000                                            # little room left: then short reasoning too
+    tight = _Prov("groq", [too_large])
+    _client(tight, monkeypatch=monkeypatch).complete_json(big, "u", max_tokens=12000)
+    assert tight.seen[1]["max_tokens"] < 3800 and tight.seen[1]["effort"] == "low"
     twice = _Prov("groq", [too_large, too_large])                # still too large: no endless loop
     from purffle_shorts.llm import LLMError
     with pytest.raises(LLMError):
