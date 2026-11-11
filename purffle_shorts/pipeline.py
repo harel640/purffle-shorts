@@ -671,6 +671,8 @@ class Studio:
         t0 = time.time()
         s = self.s
         upload = s.upload if upload is None else upload
+        if upload and "youtube" in (s.publish_to or ["youtube"]):
+            youtube.require_privacy(s)     # before any topic is claimed or anything is rendered
         languages = s.also_languages if languages is None else languages
         state: dict = {}
         pick: Topic | None = None
@@ -1122,7 +1124,12 @@ class Studio:
         self.history.update_video(rid, status=status, youtube_id=vid, uploaded_at=now_iso(), publish_at=publish_iso,
                                   error=None)
         when = f", goes public {publish.strftime('%a %d %b %H:%M %Z')}" if publish else ""
-        log.info("%s: https://youtube.com/shorts/%s%s", status.capitalize(), vid, when)
+        # The privacy status YouTube actually applied (not the one we asked for) - run-maker.ps1 reads this.
+        actual = ((resp.get("status") or {}).get("privacyStatus") or "unknown").lower()
+        log.info("%s (%s): https://youtube.com/shorts/%s%s", status.capitalize(), actual, vid, when)
+        wanted = body["status"]["privacyStatus"]
+        if actual != wanted:
+            log.warning("ALERT: YouTube reports privacy %r, but %r was requested for %s", actual, wanted, vid)
         notify.send(self.s, status, title=rec["title"], url=f"https://youtube.com/shorts/{vid}",
                     detail=f"public {publish.strftime('%a %d %b %H:%M %Z')}" if publish else "")
         if result:
@@ -1212,6 +1219,8 @@ class Studio:
                   topic: str | None = None, source: str | None = None) -> int:
         s = self.s
         upload = s.upload if upload is None else upload
+        if upload and "youtube" in (s.publish_to or ["youtube"]):
+            youtube.require_privacy(s)
         produced, batch, empty_batches = 0, 0, 0
         mode = "upload" if upload else "no-upload"
         _ = self.llm  # fail fast on LLM configuration problems

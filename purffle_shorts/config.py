@@ -204,7 +204,7 @@ class Settings:
 
     # --- YouTube --------------------------------------------------------------------------
     upload: bool = True
-    privacy: str = "public"           # public|unlisted|private
+    privacy: str = ""                 # public|unlisted|private - NO default: unset means uploads are refused
     publish_times: list[str] = field(default_factory=list)  # e.g. 09:00,14:00,19:00 -> scheduled
     timezone: str = ""
     daily_upload_limit: int = 6       # a pace; the API gives uploads their own bucket of 100 a day
