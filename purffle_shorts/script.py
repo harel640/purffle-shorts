@@ -688,6 +688,11 @@ HOOK_SCHEMA = {"type": "object", "additionalProperties": False,
                "required": ["title", "hook_text", "opening"]}
 
 
+def _numbers(text: str) -> set[str]:
+    """The numbers written with digits in ``text``, without thousands separators ("2,000" -> "2000")."""
+    return {m.replace(",", "") for m in re.findall(r"\d[\d,]*(?:\.\d+)?", text or "")}
+
+
 def ensure_concrete_hook(llm, script: Script, place_title: bool = False) -> Script:
     """A story script's title, on-screen hook and spoken opening must state concrete stakes. If any of them is
     vague, ONE rewrite of the three from the script's own facts; a part that is still vague is kept as the
@@ -719,6 +724,15 @@ def ensure_concrete_hook(llm, script: Script, place_title: bool = False) -> Scri
         log.warning("Hook rewrite failed (%s); keeping the original", e)
         return script
     new = {k: str((d or {}).get(k, "")).strip() for k in parts} if isinstance(d, dict) else {}
+    # A number the narration does not state is an invented one (Mogao: "thousands" became "2,000 Manuscripts",
+    # and the claim check then rejected the title and the hook, so the whole video was skipped).
+    known = _numbers(script.narration)
+    for k in list(new):
+        made_up = _numbers(new[k]) - known
+        if made_up:
+            log.info("Hook rewrite: %s keeps its old wording (%s not in the narration)", k,
+                     ", ".join(sorted(made_up)))
+            new[k] = ""
     if new.get("title") and not vague_hook_reason(new["title"]):
         script.title = truncate_words(re.sub(r"[<>\"“”]", "", strip_emoji(new["title"])).strip(" '-:"), 60)
     if new.get("hook_text") and not vague_hook_reason(new["hook_text"]):
