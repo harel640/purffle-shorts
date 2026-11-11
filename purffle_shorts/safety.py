@@ -22,6 +22,8 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 
+from .advisory_area_data import BORDER_LINES, GROUPS
+from .advisory_areas import Area, as_area
 from .utils import http, raise_for_status, redact
 
 log = logging.getLogger("purffle")
@@ -42,19 +44,132 @@ _ALIASES = {
     "kyrgyzstan": ["kyrgyz republic"], "kyrgyz republic": ["kyrgyzstan"],   # feed: "The Kyrgyz Republic"
 }
 
+def _area(country: str, name: str, level: int, keywords: tuple[str, ...], **kw) -> Area:
+    """An advisory area with its reference towns and border lines from advisory_area_data."""
+    return Area(name, level, keywords, tuple(tuple(g) for g in GROUPS.get((country, name), [])),
+                lines=tuple((tuple(line), buf) for line, buf in BORDER_LINES.get((country, name), [])), **kw)
+
+
 # Countries whose overall advisory is Level 1-2 but that contain specific Level 3-4 areas the State
-# Department calls out by name. Curated from the per-country advisories; review periodically. Each entry
-# is (region keyword, level). A place is blocked when its resolved region matches one of these; and a
-# country listed here is failed CLOSED when the region can't be determined.
-REGIONAL_WARNINGS: dict[str, list[tuple[str, int]]] = {
-    "india": [("jammu", 4), ("kashmir", 4), ("manipur", 4), ("india-pakistan border", 4),
-              ("chhattisgarh", 3), ("jharkhand", 3), ("bihar", 3), ("odisha", 3),
-              ("arunachal", 3), ("nagaland", 3), ("mizoram", 3), ("assam", 3), ("maoist", 3)],
-    "mexico": [("colima", 4), ("guerrero", 4), ("michoacan", 4), ("michoacán", 4), ("sinaloa", 4),
-               ("tamaulipas", 4), ("zacatecas", 4)],
-    "philippines": [("sulu", 4), ("mindanao", 4), ("marawi", 4)],
-    "egypt": [("sinai", 4)],
-    "colombia": [("arauca", 4), ("cauca", 4), ("norte de santander", 4)],
+# Department calls out by name. Curated from the per-country advisories; review periodically. A place is
+# blocked when its region or name names one of these areas (the area's own name, its provinces, districts or
+# well-known towns) OR its coordinates fall in or near it (advisory_areas.py: reference-town hulls and border
+# lines). A country listed here is failed CLOSED when neither its region nor its coordinates are known.
+# The levels are as curated on REGIONAL_WARNINGS_REVIEWED; 2026-11-11 added only the geography and the names.
+REGIONAL_WARNINGS: dict[str, list[Area]] = {
+    "india": [
+        _area("india", "Jammu and Kashmir", 4,
+              ('jammu and kashmir', 'jammu & kashmir', 'jammu', 'kashmir', 'srinagar', 'gulmarg', 'pahalgam',
+               'sonamarg', 'anantnag', 'baramulla', 'kupwara', 'gurez', 'bandipora', 'ganderbal', 'kishtwar',
+               'bhaderwah', 'udhampur', 'rajouri', 'poonch', 'kathua', 'akhnoor', 'vaishno devi', 'katra',
+               'amarnath', 'shopian', 'kulgam', 'pulwama', 'budgam', 'banihal', 'kokernag', 'verinag',
+               'dal lake', 'wular', 'kargil', 'drass', 'dras', 'uri', 'tangdhar', 'keran', 'reasi', 'ramban',
+               'doda', 'patnitop'), margin_km=12),
+        _area("india", "Manipur", 4,
+              ('manipur', 'imphal', 'loktak', 'moirang', 'ukhrul', 'churachandpur', 'thoubal', 'kakching',
+               'senapati', 'tamenglong', 'kangpokpi', 'jiribam', 'moreh', 'keibul lamjao', 'tengnoupal',
+               'kamjong', 'noney', 'pherzawl'), margin_km=15),
+        _area("india", "India-Pakistan border", 4,
+              ('india-pakistan border', 'indo-pak border', 'pakistan border', 'wagah', 'attari',
+               'hussainiwala', 'munabao', 'suchetgarh', 'dera baba nanak', 'khem karan', 'tanot', 'longewala',
+               'sir creek', 'hindumalkot', 'hindumalkote', 'sulemanki')),
+        _area("india", "Chhattisgarh", 3,
+              ('chhattisgarh', 'raipur', 'bastar', 'jagdalpur', 'dantewada', 'sukma', 'kanker', 'kondagaon',
+               'abujmarh', 'chitrakote', 'tirathgarh', 'korba', 'ambikapur', 'mainpat', 'kawardha',
+               'bhoramdeo', 'dhamtari', 'durg', 'bhilai', 'rajnandgaon', 'mahasamund', 'gariaband', 'jashpur',
+               'raigarh', 'surguja', 'dongargarh', 'sirpur mahasamund', 'barnawapara', 'kanger valley')),
+        _area("india", "Jharkhand", 3,
+              ('jharkhand', 'ranchi', 'jamshedpur', 'dhanbad', 'bokaro', 'deoghar', 'dumka', 'hazaribagh',
+               'netarhat', 'betla', 'palamu', 'daltonganj', 'medininagar', 'giridih', 'parasnath', 'shikharji',
+               'sahibganj', 'rajmahal', 'chaibasa', 'saranda', 'simdega', 'gumla', 'lohardaga', 'latehar',
+               'koderma', 'jamtara', 'pakur', 'godda', 'khunti', 'seraikela', 'maluti', 'dassam', 'hundru',
+               'jonha', 'baidyanath')),
+        _area("india", "Bihar", 3,
+              ('bihar', 'patna', 'gaya', 'bodh gaya', 'bodhgaya', 'nalanda', 'rajgir', 'vaishali', 'pawapuri',
+               'vikramshila', 'vikramashila', 'bhagalpur', 'muzaffarpur', 'darbhanga', 'purnia', 'kishanganj',
+               'katihar', 'araria', 'supaul', 'madhubani', 'sitamarhi', 'motihari', 'bettiah', 'champaran',
+               'siwan', 'chhapra', 'buxar', 'sasaram', 'kaimur', 'nawada', 'jamui', 'munger', 'begusarai',
+               'samastipur', 'hajipur', 'arrah', 'jehanabad', 'barabar', 'valmiki nagar',
+               'valmiki tiger reserve', 'raxaul', 'kesaria', 'lauriya', 'bhabua')),
+        _area("india", "Odisha", 3,
+              ('odisha', 'orissa', 'bhubaneswar', 'cuttack', 'puri', 'konark', 'konarak', 'chilika', 'chilka',
+               'berhampur', 'sambalpur', 'rourkela', 'balasore', 'baleswar', 'baripada', 'similipal',
+               'simlipal', 'keonjhar', 'koraput', 'malkangiri', 'rayagada', 'kandhamal', 'phulbani',
+               'daringbadi', 'bhitarkanika', 'hirakud', 'jeypore', 'bhawanipatna', 'kalahandi', 'nabarangpur',
+               'angul', 'dhenkanal', 'jajpur', 'kendrapara', 'paradip', 'paradeep', 'talcher', 'sundargarh',
+               'jharsuguda', 'bargarh', 'balangir', 'bolangir', 'nuapada', 'khandagiri', 'lalitgiri', 'dhauli',
+               'raghurajpur', 'satkosia', 'gahirmatha', 'chandipur', 'gopalpur-on-sea')),
+        _area("india", "Arunachal Pradesh", 3,
+              ('arunachal', 'itanagar', 'tawang', 'bomdila', 'dirang', 'ziro', 'seppa', 'daporijo', 'pasighat',
+               'yingkiong', 'tezu', 'anini', 'roing', 'changlang', 'khonsa', 'namdapha', 'mechuka', 'menchuka',
+               'tuting', 'parshuram kund', 'sela pass', 'bum la', 'bhalukpong', 'namsai', 'miao', 'mayodia',
+               'dambuk')),
+        _area("india", "Nagaland", 3,
+              ('nagaland', 'kohima', 'dimapur', 'mokokchung', 'tuensang', 'wokha', 'zunheboto', 'phek',
+               'kiphire', 'longleng', 'peren', 'noklak', 'dzukou', 'dzüko', 'dzuko', 'khonoma', 'kisama',
+               'hornbill festival', 'pfutsero', 'touphema', 'longwa')),
+        _area("india", "Mizoram", 3,
+              ('mizoram', 'aizawl', 'lunglei', 'champhai', 'kolasib', 'mamit', 'serchhip', 'saiha', 'siaha',
+               'lawngtlai', 'phawngpui', 'palak dil', 'dampa', 'reiek', 'vantawng', 'tam dil', 'khawzawl')),
+        _area("india", "Assam", 3,
+              ('assam', 'guwahati', 'kaziranga', 'majuli', 'manas', 'sivasagar', 'sibsagar', 'jorhat',
+               'dibrugarh', 'tinsukia', 'tezpur', 'nagaon', 'haflong', 'dima hasao', 'karbi anglong', 'diphu',
+               'silchar', 'karimganj', 'hailakandi', 'barpeta', 'kokrajhar', 'dhubri', 'goalpara',
+               'bongaigaon', 'nalbari', 'golaghat', 'north lakhimpur', 'dhemaji', 'sualkuchi', 'hajo',
+               'pobitora', 'dibru-saikhowa', 'digboi', 'umananda', 'kamakhya', 'sadiya', 'morigaon', 'mayong',
+               'hojai', 'udalguri', 'chirang', 'baksa', 'biswanath', 'charaideo', 'nameri', 'orang',
+               'barak valley', 'brahmaputra valley')),
+        # Not a place: a Maoist/Naxalite area is named by districts above, or by these words.
+        Area("Maoist (Naxalite) areas", 3, ("maoist", "naxalite", "naxal", "red corridor")),
+    ],
+    "mexico": [
+        _area("mexico", "Colima", 4,
+              ('colima', 'manzanillo', 'tecoman', 'tecomán', 'revillagigedo', 'socorro island')),
+        _area("mexico", "Guerrero", 4,
+              ('guerrero', 'acapulco', 'taxco', 'zihuatanejo', 'ixtapa', 'chilpancingo', 'iguala')),
+        _area("mexico", "Michoacán", 4,
+              ('michoacan', 'michoacán', 'morelia', 'uruapan', 'patzcuaro', 'pátzcuaro', 'apatzingan',
+               'apatzingán', 'zitacuaro', 'zitácuaro', 'paricutin', 'paricutín', 'janitzio',
+               'monarch butterfly biosphere')),
+        _area("mexico", "Sinaloa", 4,
+              ('sinaloa', 'culiacan', 'culiacán', 'mazatlan', 'mazatlán', 'los mochis', 'cosala', 'cosalá',
+               'topolobampo')),
+        _area("mexico", "Tamaulipas", 4,
+              ('tamaulipas', 'reynosa', 'matamoros', 'nuevo laredo', 'tampico', 'ciudad victoria',
+               'ciudad madero')),
+        _area("mexico", "Zacatecas", 4,
+              ('zacatecas', 'fresnillo', 'sombrerete', 'jerez de garcía salinas', 'jerez de garcia salinas')),
+    ],
+    "philippines": [
+        _area("philippines", "Sulu Archipelago", 4,
+              ('sulu', 'jolo', 'tawi-tawi', 'tawi tawi', 'basilan', 'bongao', 'siasi', 'sitangkai',
+               'pangutaran', 'lamitan', 'turtle islands', 'mapun', 'sibutu', 'simunul'), margin_km=25),
+        _area("philippines", "Mindanao", 4,
+              ('mindanao', 'zamboanga', 'davao', 'cotabato', 'cagayan de oro', 'iligan', 'lanao', 'bukidnon',
+               'misamis', 'agusan', 'surigao', 'siargao', 'dinagat', 'camiguin', 'sarangani', 'general santos',
+               'sultan kudarat', 'maguindanao', 'butuan', 'dipolog', 'dapitan', 'pagadian', 'ozamiz', 'ozamis',
+               'oroquieta', 'koronadal', 'kidapawan', 'tagum', 'bislig', 'tandag', 'lake sebu', 'mount apo',
+               'mt. apo', 'island garden city of samal', 'soccsksargen', 'caraga', 'bangsamoro', 'barmm',
+               'hinatuan', 'malaybalay', 'gingoog', 'cabadbaran', 'digos', 'mati city', 'nabunturan',
+               'kitanglad', 'hamiguitan', 'tinuy-an', 'fort pilar')),
+        _area("philippines", "Marawi", 4,
+              ('marawi', 'lake lanao', 'lanao del sur'), margin_km=20),
+    ],
+    "egypt": [
+        _area("egypt", "Sinai", 4,
+              ('sinai', 'sharm el sheikh', 'sharm el-sheikh', 'sharm', 'dahab', 'nuweiba', 'taba',
+               'saint catherine', 'st catherine', 'st. catherine', 'el tor', 'arish', 'rafah', 'ras mohammed',
+               'ras muhammad', 'sheikh zuweid', 'nekhel', 'ras sudr', 'ras sedr', 'blue hole'), margin_km=10),
+    ],
+    "colombia": [
+        _area("colombia", "Arauca", 4,
+              ('arauca', 'saravena', 'arauquita')),
+        _area("colombia", "Cauca", 4,
+              ('cauca', 'popayan', 'popayán', 'tierradentro', 'guapi', 'timbiqui', 'timbiquí',
+               'santander de quilichao'), exclude=('valle del cauca', 'cauca river', 'río cauca', 'rio cauca')),
+        _area("colombia", "Norte de Santander", 4,
+              ('norte de santander', 'cucuta', 'cúcuta', 'ocaña', 'ocana', 'catatumbo', 'tibu', 'tibú')),
+    ],
 }
 # The date REGIONAL_WARNINGS was last checked against the per-country advisories. advisory_drift() flags a
 # listed country whose advisory was reissued after this, so the list is re-read rather than silently aging.
@@ -304,20 +419,33 @@ def _identify(topic: str, llm) -> tuple[list[str], str]:
     return names, str(data.get("region", "")).strip().lower()
 
 
-def _regional_verdict(names: list[str], region: str) -> Verdict | None:
-    """For a country with named Level 3-4 areas: block when the region is one of them, fail CLOSED when the
-    region is unknown, and return None (country-level result stands) when the region is a safe one."""
+def _kind(level: int) -> str:
+    return "Do Not Travel" if level >= 4 else "Reconsider Travel"
+
+
+def _regional_verdict(names: list[str], region: str, place: str = "", lat: float | None = None,
+                      lon: float | None = None) -> Verdict | None:
+    """For a country with named Level 3-4 areas: block when the place's region or name names one of them, or
+    its coordinates are in or near one; fail CLOSED when neither the region nor the coordinates are known;
+    otherwise None (the country-level result stands)."""
     country = next((n for n in names if n in REGIONAL_WARNINGS), None)
     if country is None:
         return None
-    if not region:
-        return Verdict(True, f"{country.title()}: the region could not be determined, and this country has "
-                             f"Level 3-4 areas — skipping to be safe", country)
-    for kw, lvl in REGIONAL_WARNINGS[country]:
-        if kw in region or region in kw:
-            kind = "Do Not Travel" if lvl >= 4 else "Reconsider Travel"
-            return Verdict(True, f"{country.title()} ({region.title()}): US State Dept Level {lvl} ({kind})",
-                           country, lvl)
+    areas = [as_area(e) for e in REGIONAL_WARNINGS[country]]
+    for a in areas:
+        word = a.named_in(region, place)
+        if word:
+            return Verdict(True, f"{country.title()} ({a.name}, named as {word!r}): US State Dept Level "
+                                 f"{a.level} ({_kind(a.level)})", country, a.level)
+    located = lat is not None and lon is not None
+    if located:
+        for a in areas:
+            if a.has_geometry and a.contains(lat, lon):
+                return Verdict(True, f"{country.title()} ({a.name}: {lat:.2f}, {lon:.2f} is in or near it): US "
+                                     f"State Dept Level {a.level} ({_kind(a.level)})", country, a.level)
+    if not region and not located:
+        return Verdict(True, f"{country.title()}: neither the region nor the coordinates are known, and this "
+                             f"country has Level 3-4 areas — skipping to be safe", country)
     return None
 
 
@@ -332,10 +460,12 @@ def _match_level(names: list[str], feed: dict[str, int]) -> tuple[int | None, st
     return None, ""
 
 
-def check(topic: str, llm, *, require_place: bool = False) -> Verdict:
+def check(topic: str, llm, *, require_place: bool = False, lat: float | None = None,
+          lon: float | None = None) -> Verdict:
     """The advisory decision for a topic located by the LLM. Fails CLOSED when the LLM can't be asked
     (transient). ``require_place``: the topic must be a real place (e.g. the resolved place of a video) - the
-    LLM finding no country is then a reason to skip, not a pass."""
+    LLM finding no country is then a reason to skip, not a pass. ``lat``/``lon``, when known, are checked
+    against the warned areas too, and the topic text itself against their names."""
     try:
         names, region = _identify(topic, llm)
     except LocationUnavailable as e:
@@ -344,7 +474,7 @@ def check(topic: str, llm, *, require_place: bool = False) -> Verdict:
         if require_place:
             return Verdict(True, f"could not tell which country {topic!r} is in")
         return Verdict(False)  # the LLM says it is not one specific destination: there is no advisory to read
-    return verdict_for(names, region)
+    return verdict_for(names, region, place=topic, lat=lat, lon=lon)
 
 
 def same_country(a: str, b: str) -> bool:
@@ -352,10 +482,12 @@ def same_country(a: str, b: str) -> bool:
     return bool(set(country_names(a)) & set(country_names(b)))
 
 
-def verdict_for(names: list[str], region: str = "") -> Verdict:
+def verdict_for(names: list[str], region: str = "", *, place: str = "", lat: float | None = None,
+                lon: float | None = None) -> Verdict:
     """The advisory decision for a place already located: ``names`` from country_names(), ``region`` its
-    state/province. Same fail-CLOSED rules as check(), with no LLM call — so a topic list can be vetted
-    ahead of time exactly as the Maker will vet each video."""
+    state/province, ``place`` its name (matched against the warned areas' names too) and, when known, its
+    coordinates. Same fail-CLOSED rules as check(), with no LLM call — so a topic list can be vetted ahead of
+    time exactly as the Maker will vet each video."""
     names = [n.strip().lower() for n in names if n and n.strip()]
     region = (region or "").strip().lower()
     if not names:
@@ -377,7 +509,7 @@ def verdict_for(names: list[str], region: str = "") -> Verdict:
         kind = "Do Not Travel" if level >= 4 else "Reconsider Travel"
         return Verdict(True, f"{matched.title()}: US State Dept Level {level} ({kind})", matched, level)
     # The country as a whole is Level 1-2, but it may contain Level 3-4 areas (e.g. India: Jammu & Kashmir).
-    regional = _regional_verdict(names, region)
+    regional = _regional_verdict(names, region, place, lat, lon)
     if regional is not None:
         if regional.unsafe:
             log.warning("Safety: %s", regional.reason)
