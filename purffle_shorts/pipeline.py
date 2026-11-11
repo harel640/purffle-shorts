@@ -40,6 +40,7 @@ from .script import (
     fit_story_length,
     load_script,
     recent_violence_reason,
+    split_scenes,
     localize_metadata,
     review_script,
     translate_script,
@@ -147,6 +148,23 @@ def _future(iso: str | None) -> datetime | None:
     return t if t > datetime.now(timezone.utc) else None
 
 
+MAX_IMAGE_SECONDS = 8.0      # no picture of a story stays on screen longer than this
+MIN_STORY_SCENES = 6         # ... and a story has at least this many pictures
+# The modern era is shown with real photos, never AI: scholars, museums, cities, "today", any year from 1900
+# (Mogao: "Scholars dispersed the collection to Beijing, London, Paris" became an AI skyline).
+_MODERN_RE = re.compile(
+    r"\b(?:19\d\d|20\d\d)s?\b|\b(today'?s?|nowadays|currently|modern|scholars?|researchers?|"
+    r"archaeologists?|historians?|scientists?|experts?|visitors?|tourists?|museums?|unesco|world heritage|"
+    r"academy|institutes?|programmes?|programs?|universit(?:y|ies)|conservation|exhibitions?|photograph\w*|"
+    r"london|paris|berlin|beijing|new york|tokyo|delhi|st\.? petersburg|skylines?)\b", re.I)
+
+
+def modern_scene(narration: str) -> bool:
+    """True when a scene tells the modern era (1900 on, today, scholars, museums, modern cities): it is shown
+    with a real photo, never an AI illustration."""
+    return bool(_MODERN_RE.search(narration or ""))
+
+
 def plan_ai_scenes(historical: list[bool]) -> list[bool]:
     """Which scenes get an AI illustration vs a real photo. The first and last scene are always real photos,
     at most 5 scenes are AI, and at least ~40% of scenes are real. Extra AI scenes become real photos, dropped
@@ -248,7 +266,7 @@ def grounding_article(pick: Topic, lang: str = "en") -> tuple[str, str]:
     party's article); if it is missing the topic is skipped rather than grounded in a guess. The article's
     canonical title and coordinates are kept on ``pick``. Other topics use the best search match.
 
-    The writer is given the first WRITER_SOURCE_CHARS of the article (returned); more of it is kept on
+    The writer is given WRITER_SOURCE_CHARS of the article (returned: factcheck.story_source); more of it is kept on
     ``pick.source_full`` for the claim check, so a true statement from a later section is not thrown out."""
     if not pick.wiki_title:
         text, url = topics.article(pick.subject, lang, max_chars=factcheck.SOURCE_FETCH_CHARS)
@@ -261,7 +279,9 @@ def grounding_article(pick: Topic, lang: str = "en") -> tuple[str, str]:
             pick.lat, pick.lon = page["lat"], page["lon"]
         text, url = page["text"], page["url"]
     pick.source_full = text
-    return text[:WRITER_SOURCE_CHARS], url
+    # The writer reads the opening and the stretch of the article that carries a human thread (who found,
+    # built or lost it) - not just the first 5,000 characters, where Mogao's monk never appears.
+    return factcheck.story_source(text, WRITER_SOURCE_CHARS), url
 
 
 WRITER_SOURCE_CHARS = 5000          # how much of the article the script writer reads
@@ -533,7 +553,8 @@ class Studio:
         if lo <= total <= hi:
             return script, speech, total
         source = (pick.source_full or pick.source_text) if pick is not None else ""
-        fixed = (fit_story_length(self.llm, script, total, lo, hi, source=source[:WRITER_SOURCE_CHARS])
+        fixed = (fit_story_length(self.llm, script, total, lo, hi,
+                                  source=factcheck.story_source(source, WRITER_SOURCE_CHARS))
                  if self.llm is not None else None)
         if fixed is not None:
             script = fixed
@@ -648,7 +669,7 @@ class Studio:
                 # passage of the article. Unsupported sentences are removed; fail closed.
                 script = self._claim_check(script, pick, title_len=40 if place_locked_channel else 60)
             if script.style in STORY_STYLES:
-                why = recent_violence_reason(script)       # the channel never tells recent tragedies
+                why = recent_violence_reason(script, pick.source_full or pick.source_text)   # no recent tragedies
                 if why:
                     raise SkipTopic(f"topic centred on {why}")
         except BaseException as e:
@@ -802,6 +823,22 @@ class Studio:
             chat = script.style == "chat"
             timeline = scene_timeline([sc.narration for sc in script.scenes], speech.words, total, s.language,
                                       starts=speech.line_starts, min_len=4.5 if chat else 1.2)
+            if script.style in STORY_STYLES and speech.line_starts is None:
+                # Each scene of a story gets ONE picture: cut scenes so none stays up longer than
+                # MAX_IMAGE_SECONDS and there are at least MIN_STORY_SCENES (Mogao: 3 pictures in 53 s). Same
+                # words, so the voice-over is unchanged.
+                spoken = [0.0] * len(script.scenes)
+                for st in timeline:
+                    spoken[st.index] += st.duration
+                finer = split_scenes(script, spoken, MAX_IMAGE_SECONDS, MIN_STORY_SCENES)
+                if len(finer.scenes) != len(script.scenes):
+                    log.info("Scenes: split %d -> %d so no picture stays on screen over %gs",
+                             len(script.scenes), len(finer.scenes), MAX_IMAGE_SECONDS)
+                    script = finer
+                    (folder / "script.json").write_text(json.dumps(script.to_dict(), indent=2, ensure_ascii=False),
+                                                        encoding="utf-8")
+                    timeline = scene_timeline([sc.narration for sc in script.scenes], speech.words, total,
+                                              s.language, min_len=1.2)
             # A chat story's picture is mostly the phone screen: more cuts behind it would only cost time.
             shots = split_shots(timeline, speech.words, 0 if chat else s.max_shot_seconds)
             joins = [a.index == b.index for a, b in zip(shots, shots[1:])]
@@ -833,7 +870,7 @@ class Studio:
                     # AI past scenes only for the "history" style, and kept grounded: first & last scene real,
                     # at least ~40% of scenes real, at most 5 AI scenes (see plan_ai_scenes).
                     hist = plan_ai_scenes([bool(sc.historical) and script.style == "history"
-                                           for sc in script.scenes])
+                                           and not modern_scene(sc.narration) for sc in script.scenes])
                     scene_jobs = [(sc.search_query, sc.image_prompt, h) for sc, h in zip(script.scenes, hist)]
                     if script.scenes:
                         log.info("Scenes: %d total, %d AI, %d real photos (first & last real)",

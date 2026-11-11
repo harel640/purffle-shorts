@@ -275,6 +275,11 @@ class Chunk:
         return self.words[0].speaker if self.words else "A"
 
 
+_DANGLING = {"a", "an", "the", "of", "in", "on", "at", "to", "by", "for", "from", "with", "into", "onto", "and",
+             "or", "but", "after", "before", "as", "when", "while", "than", "its", "his", "her", "their", "our"}
+_UNITS = {"ce", "bce", "ad", "bc", "km", "m", "kg", "%", "percent", "metres", "meters", "feet", "ft", "miles"}
+
+
 def caption_chunks(words: list[Word], max_words: int = 3, max_chars: int = 20, total: float | None = None) -> list[Chunk]:
     """Group words into short on-screen captions. Breaks at sentence ends, long pauses and length limits."""
     chunks: list[Chunk] = []
@@ -294,8 +299,15 @@ def caption_chunks(words: list[Word], max_words: int = 3, max_chars: int = 20, t
         if cur:
             gap = w.start - cur[-1].end
             chars = sum(len(x.text) + 1 for x in cur) + len(w.text)
-            if len(cur) >= max_words or chars > max_chars or gap > 0.45 or w.speaker != cur[-1].speaker:
+            same_breath = gap <= 0.45 and w.speaker == cur[-1].speaker
+            # "366 CE", "25 km": a number keeps its unit on the same caption.
+            unit = same_breath and cur[-1].text[:1].isdigit() and w.text.lower().strip(".,;:!?") in _UNITS
+            if not unit and (len(cur) >= max_words or chars > max_chars or not same_breath):
+                # Never end a caption on a word that belongs to the next one ("366 CE after" / "monk Yuezun"):
+                # it moves on with the phrase it introduces.
+                carry = [cur.pop()] if same_breath and len(cur) >= 2 and cur[-1].text.lower() in _DANGLING else []
                 flush()
+                cur.extend(carry)
         cur.append(w)
         if w.text[-1:] in ".!?;:" or (w.text[-1:] == "," and len(cur) >= 2):
             flush()

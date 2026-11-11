@@ -528,6 +528,13 @@ _DEITY_RE = re.compile(
 # Himalayan monastery vs a Hoysala temple). First match wins, so the more specific styles come first. Positive
 # descriptions only: FLUX draws what is named, so the named roof/material is what keeps the wrong one out.
 _LOOK_BY_KEYWORD: list[tuple[re.Pattern, str, str]] = [
+    # First: a Buddhist cave site on the Silk Road must not fall through to the Silk Road mosque rule below.
+    (re.compile(r"\b(?:grottoe?s?|mogao|dunhuang|yungang|longmen|maijishan|bezeklik|kizil caves)\b|"
+                r"thousand buddha caves", re.I),
+     "Chinese Buddhist cave temples: rows of cave entrances cut into a long sandstone cliff face above a desert "
+     "oasis, timber-framed porches and a tall wooden pagoda facade built against the cliff, walls inside painted "
+     "with murals in red, green and ochre",
+     "Buddhist monks in ochre and saffron robes, pilgrims and Silk Road merchants in layered silk and cotton robes"),
     (re.compile(r"tibetan|gompa|gonpa|lamasery|vajrayana|nyingma|kagyu|gelug|sakya|drukpa|\bbon\b|dolpo|"
                 r"ladakh|zanskar|upper mustang|spiti", re.I),
      "Tibetan Buddhist monastery architecture: whitewashed stone and mud-brick walls with dark red upper bands, "
@@ -566,7 +573,8 @@ _LOOK_BY_KEYWORD: list[tuple[re.Pattern, str, str]] = [
     (re.compile(r"\bkhmer\b|angkor|\bprasat\b|\bprang\b", re.I),
      "Khmer temple architecture: corn-cob sandstone prang towers, carved lintels and laterite galleries",
      "people in sampot wraps of cotton and silk, palm-leaf hats"),
-    (re.compile(r"gopuram|gopura|dravidian|vijayanagara|chola|pallava|pandya|\bmandapa", re.I),
+    # Whole words only: "chola" inside "scholars" gave the Mogao Caves South Indian gopuram towers.
+    (re.compile(r"\b(?:gopurams?|gopuras?|dravidian|vijayanagara|chola|pallava|pandya|mandapas?)\b", re.I),
      "South Indian stone temple architecture: tall tiered gopuram gateway towers and pillared mandapa halls of "
      "carved granite",
      "people in draped cotton dhotis and saris with flowers in the hair"),

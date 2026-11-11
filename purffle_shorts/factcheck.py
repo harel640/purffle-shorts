@@ -354,6 +354,83 @@ def _overlap(sentence: str, quote: str) -> float | None:
     return round(sum(w[:5] in stems for w in words) / len(words), 2)
 
 
+# What makes a paragraph part of a story: people and what they did. (Mogao Caves: Wang Yuanlu, Stein and
+# Pelliot are 7-14k characters into the article; the writer, given only the opening, made a monk up.)
+_PEOPLE_RE = re.compile(
+    r"\b(monks?|priests?|abbots?|nuns?|hermits?|pilgrims?|kings?|queens?|emperors?|empress|princes?|princess|"
+    r"sultans?|rajas?|maharajas?|khans?|governors?|generals?|soldiers?|merchants?|traders?|explorers?|travell?ers?|"
+    r"archaeologists?|scholars?|missionar(?:y|ies)|villagers?|farmers?|fishermen|builders?|craftsmen|painters?|"
+    r"workers?|families|daughters?|sons?|wife|husband|widow|Taoist|Buddhist|he|she|his|her)\b", re.I)
+_DEED_RE = re.compile(
+    r"\b(discover\w*|found|founded|built|carved|sealed|walled|opened|broke|fled|escaped|sold|bought|paid|took|"
+    r"carried|smuggled|removed|rescued|saved|restored|destroyed|burned|abandoned|rediscovered|excavated|"
+    r"ordered|commissioned|married|died|buried|hid|hidden|stole|lost|returned|guarded|cleared|set about|"
+    r"persuaded|acquired|shipped|reported|ruled|killed|murdered|defeated|surrendered|moved)\b", re.I)
+# A person doing it: a role word or pronoun above, or a capitalised name just before the verb ("Wang
+# discovered", "Stein took", "Kashyapa moved").
+_NAMED_DEED_RE = re.compile(r"\b[A-Z][a-z]{2,}(?: [A-Z][a-z]+)?(?:'s)?(?: (?:had|was|then|finally|later|also))? "
+                            r"(?:" + _DEED_RE.pattern[3:-3] + r")\b")
+STORY_LEAD_CHARS = 1600
+
+
+def _story_score(paragraph: str) -> int:
+    """How much of a human thread a paragraph carries: its sentences in which a person does something (2 each,
+    +1 with a date). Dates or verbs alone (a list of school openings) do not count."""
+    if len(paragraph) < 120:
+        return 0                              # a section heading
+    n = 0
+    for s in re.split(r"(?<=[.!?])\s+", paragraph):
+        if _DEED_RE.search(s) and (_PEOPLE_RE.search(s) or _NAMED_DEED_RE.search(s)):
+            n += 2 + bool(re.search(r"\b(?:1\d{3}|20\d{2})\b|\bcentury\b", s))
+    return n
+
+
+def story_source(text: str, budget: int) -> str:
+    """What the story writer reads of a long article: its opening (what the place is) and then the paragraphs
+    richest in a human thread - people the article names and what they did, with dates - in article order,
+    within ``budget`` characters. The claim check still reads the article itself (select_source)."""
+    text = (text or "").strip()
+    if len(text) <= budget:
+        return text
+    paras = [p.strip() for p in text.split("\n") if p.strip()]
+    lead: list[int] = []
+    used = 0
+    for i, p in enumerate(paras):
+        if used >= STORY_LEAD_CHARS or (lead and len(p) < 40):      # stop at the first section heading
+            break
+        lead.append(i)
+        used += len(p) + 1
+
+    scores = [_story_score(p) for p in paras]
+    # A story lives in one stretch of the article ("Discovery and revival"), not in scattered paragraphs: take
+    # the run of consecutive paragraphs after the opening with the most people, deeds and dates that fits.
+    room = budget - used
+    best, span = 0, None
+    first = (lead[-1] + 1) if lead else 0
+    for a in range(first, len(paras)):
+        size, total = 0, 0
+        for b in range(a, len(paras)):
+            size += len(paras[b]) + 1
+            if size > room:
+                break
+            total += scores[b]
+            if total > best:
+                best, span = total, (a, b)
+    keep = set(lead)
+    if span:
+        keep.update(range(span[0], span[1] + 1))
+        used += sum(len(paras[i]) + 1 for i in range(span[0], span[1] + 1))
+    for i in sorted((i for i in range(len(paras)) if i not in keep), key=lambda i: -scores[i]):
+        if scores[i] > 0 and used + len(paras[i]) + 1 <= budget:   # what still fits: the next-richest
+            keep.add(i)
+            used += len(paras[i]) + 1
+    for i in range(len(paras)):                # an article with little story in it: the rest in order
+        if i not in keep and used + len(paras[i]) + 1 <= budget:
+            keep.add(i)
+            used += len(paras[i]) + 1
+    return "\n".join(paras[i] for i in sorted(keep))[:budget]
+
+
 def select_source(source: str, script_text: str, budget: int = 0) -> str:
     """The part of the article shown to the checker. Short articles go whole. A long one keeps its lead (what
     the writer saw) plus the later paragraphs that share the most words with the script, in article order."""

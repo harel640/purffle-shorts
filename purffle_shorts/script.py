@@ -11,7 +11,7 @@ import json
 import logging
 import random
 import re
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import asdict, dataclass, field, fields, replace
 from pathlib import Path
 
 from .config import Settings
@@ -230,16 +230,40 @@ def scene_plan(style: str, target_seconds: int) -> tuple[int, int]:
     return words, max(4, min(10, round(target_seconds / 5.5)))
 
 
+# Week 2 (Mogao Caves): every fact was right and the video still read like a Wikipedia list ("The site
+# contains...", "the complex comprises..."). A story is the SAME true facts, chosen and ordered around one
+# person the article names: setup -> turning point -> payoff.
+STORY_SHAPE_RULE = (
+    "- Tell it as a STORY, not an encyclopedia entry. Pick ONE human thread that the background itself "
+    "describes: a person or group it names and what they did (who found, built, sealed, saved, sold or lost "
+    "it). Order the facts SETUP (who, where, the situation) -> TURNING POINT (the moment everything changed) "
+    "-> PAYOFF (what it cost or meant, and what is left today). The drama comes from that order and from "
+    "strong plain words (sealed, broke open, carried off, vanished) - never from invented events, scenes, "
+    "dialogue or details. If the background names nobody, follow the place itself through one change. Do NOT "
+    "list several rulers, dates or battle details. ONLY what the background states; never invent names, "
+    "dates, numbers or quotes.\n"
+    "- Never encyclopedia phrasing: no \"the site contains\", \"comprises\", \"consists of\", \"is located\", "
+    "\"is known for\", \"is home to\", \"features\", \"spanning\", \"overall\", \"notable\", \"a total of\". "
+    "Say what happened, to whom, and when.\n"
+    "- At least 6 scenes of one or two short sentences each.\n")
+_ENCYCLOPEDIA_RE = re.compile(
+    r"\b(the (?:site|complex|area|park|temple|caves?|monastery|fort|city|town|island) (?:contains?|comprises|"
+    r"consists of|features|includes)|comprises|consists of|is (?:located|situated)|is known for|is home to|"
+    r"spanning|overall(?=,)|is notable|notably|a total of|is (?:one of|among) the (?:largest|oldest|finest))\b", re.I)
+
+
+def encyclopedia_phrases(text: str) -> list[str]:
+    """The encyclopedia phrasings in ``text`` ("the site contains", "comprises"...), in order, de-duplicated."""
+    return list(dict.fromkeys(m.group(0).lower() for m in _ENCYCLOPEDIA_RE.finditer(text or "")))
+
+
 def _format_rules(style: str) -> str:
     if style == "history":
         return ("- speaker is always \"A\": one calm, cinematic narrator.\n"
                 "- Scene 1 narration states the story's CONCRETE STAKES in one line (8-14 words, no greeting): "
                 "who or what, and what was won or lost, with a number, date or superlative - a statement, not a "
                 "vague question (\"One of history's richest cities vanished in months.\").\n"
-                "- Tell ONE human thread: who built it, who ruled or lost it, a rescue, a disappearance, with "
-                "ONE clear turning point in the middle. Keep it to that single thread — do NOT list several "
-                "rulers, dates or battle details. ONLY well-established history; never invent names, dates, "
-                "numbers or quotes.\n")
+                + STORY_SHAPE_RULE)
     if style == "place":
         return ("- speaker is always \"A\": one calm, cinematic narrator.\n"
                 "- Scene 1 narration states the story's CONCRETE STAKES in one line (8-14 words, no greeting): "
@@ -597,7 +621,11 @@ def _resize_story(llm, script: Script, subject: str, lo_words: int, hi_words: in
                "to the scenes where they fit: each new sentence is short (max 18 words) and states ONE fact "
                + ("that the SOURCE below states and the draft does not tell yet (what happened, who, when, how "
                   "big), in plain words" if source else
-                  "that the draft already implies, adding no new facts"))
+                  "that the draft already implies, adding no new facts")
+               + ". Each new sentence moves the SAME story on - the person or event the draft follows, in "
+                 "setup -> turning point -> payoff order - and is told as something that happened, in your own "
+                 "words. Never copy the source's wording and never describe like an encyclopedia (no \"the "
+                 "site contains\", \"comprises\", \"consists of\", \"spanning\", \"overall\", \"is known for\")")
     else:
         how = ("Shorten it by DELETING whole sentences or side clauses (repetition and side details first). "
                "Do NOT reword the sentences that stay")
@@ -703,24 +731,125 @@ def ensure_concrete_hook(llm, script: Script, place_title: bool = False) -> Scri
 
 
 # ---------------------------------------------------------------------------------- recent violence (#5)
-_VIOLENCE_RE = re.compile(r"\b(killed|killing|kill|died|dies|deaths?|dead|massacres?|massacred|shot|shooting|"
+_VIOLENCE_RE = re.compile(r"\b(killed|killing|kill|died|dies|deaths?|dead|deadly|massacres?|massacred|shot|shooting|"
                           r"bomb\w*|blasts?|explosions?|attacks?|attacked|protests?|protesters?|riots?|rioting|"
                           r"uprising|coup|crackdown|insurgen\w*|militants?|terror\w*|assassinat\w*|clashes|"
                           r"curfew|martyrs?|war|wars|genocide|executed|executions?|refugees?|casualties|"
-                          r"earthquake killed|tragedy|tragedies)\b", re.I)
+                          r"violen(?:ce|t)|opened fire|opening fire|fired (?:on|at|into)|gunfire|slaughter\w*|"
+                          r"wounded|earthquake killed|tragedy|tragedies)\b", re.I)
 _RECENT_RE = re.compile(r"\b(19\d\d|20\d\d)s?\b|\b(recent(?:ly)?|last year|this year|nowadays|today'?s)\b",
                         re.I)
+# Dates that place an event before 1900: a year before 1900 ("in 1221", "366 CE", "AD 800", "200 BCE"), a
+# century before the 20th ("the 5th century"), or an era word ("ancient", "a dynasty", "legend says").
+_OLD_YEAR_RE = re.compile(r"\b(?:in|since|by|around|about|circa|c\.|from|until|year|AD)\s+(\d{1,4})\b(?![,.]\d)|"
+                          r"\b(\d{1,4})\s*(?:CE|AD|A\.D\.)\b|\b\d{1,4}\s*(?:BCE|BC|B\.C\.)", re.I)
+_OLD_CENTURY_RE = re.compile(r"\b(\d{1,2})(?:st|nd|rd|th)[- ]century\b", re.I)
+_OLD_ERA_RE = re.compile(r"\b(ancient|medieval|mediaeval|prehistoric|dynast(?:y|ies)|empires?|kingdoms?|"
+                         r"sultanates?|centuries ago|millennia|legend(?:s)? says?|legend has it|bronze age|iron age|"
+                         r"neolithic|antiquity)\b", re.I)
+_ARTICLE_YEAR_RE = re.compile(r"(?<![\d,.])\b(1\d{3}|20\d{2})\b(?![,.]\d)")
+_THREAD_STOP = {"the", "and", "with", "that", "this", "from", "into", "onto", "their", "there", "were", "was",
+                "when", "then", "after", "before", "which", "while", "they", "them", "over", "under", "turned",
+                "resulting", "result", "people", "place", "island", "city", "town", "today"}
 
 
-def recent_violence_reason(script: Script) -> str:
-    """Why a script is about recent deaths, protests, riots or political violence (after 1900), or "". Any
-    sentence of the title, hook or narration that names such an event together with a 1900+ year (or
-    'recently') counts: the channel tells stories of the deep past, not of recent suffering."""
-    text = " ".join([script.title, script.hook_text] + [sc.narration for sc in script.scenes])
-    for sentence in re.split(r"(?<=[.!?])\s+", text):
-        v, r = _VIOLENCE_RE.search(sentence), _RECENT_RE.search(sentence)
-        if v and r:
+def _date_kind(text: str) -> str:
+    """"recent" (1900 or later, or 'recently'), "old" (dated before 1900 or by an era) or "" (no date)."""
+    if _RECENT_RE.search(text):
+        return "recent"
+    for m in _OLD_YEAR_RE.finditer(text):
+        y = next((g for g in m.groups() if g), None)
+        if y is None or int(y) < 1900:          # a BCE date has no captured year: old
+            return "old"
+    if any(int(m.group(1)) <= 19 for m in _OLD_CENTURY_RE.finditer(text)) or _OLD_ERA_RE.search(text):
+        return "old"
+    return ""
+
+
+def _stem(w: str) -> str:
+    return re.sub(r"(?:ing|ed|es|s)$", "", w) if len(w) > 4 else w
+
+
+def _thread_tokens(text: str) -> set[str]:
+    return {_stem(w) for w in re.findall(r"[a-z]{4,}", text.lower()) if w not in _THREAD_STOP}
+
+
+def _article_date(sentence: str, article: str) -> tuple[str, str]:
+    """When the article dates the event a script sentence tells: ("recent"|"old"|"", evidence). The article's
+    sentences about it are those naming violence that share the most words with the script's sentence; the
+    date is taken from that sentence or, failing that, from the sentences before it in the same paragraph
+    (Wikipedia often dates a passage once: "part of the breakaway state (1959-1963) ... soldiers opened fire")."""
+    if not article:
+        return "", ""
+    mine = _thread_tokens(sentence)
+    best, hits = 0, []
+    for para in re.split(r"\n\s*\n|\n(?==)", article):
+        sents = [x for x in re.split(r"(?<=[.!?])\s+|\n", para) if x.strip()]
+        for i, s in enumerate(sents):
+            if not _VIOLENCE_RE.search(s):
+                continue
+            shared = len(mine & _thread_tokens(s))
+            if shared < 2 or shared < best:
+                continue
+            if shared > best:
+                best, hits = shared, []
+            hits.append((s, sents[max(0, i - 4):i]))
+    kinds = []
+    for s, before in hits:
+        for ctx in [s, *reversed(before)]:
+            years = [int(y) for y in _ARTICLE_YEAR_RE.findall(ctx)]
+            kind = ("recent" if any(y >= 1900 for y in years) else "old") if years else _date_kind(ctx)
+            if kind:
+                kinds.append((kind, ctx.strip()[:90]))
+                break
+    for kind in ("recent", "old"):            # any recent dating wins: fail closed
+        ev = next((e for k, e in kinds if k == kind), None)
+        if ev is not None:
+            return kind, ev
+    return "", ""
+
+
+def recent_violence_reason(script: Script, article: str = "") -> str:
+    """Why a script is about recent deaths, protests, riots or political violence (1900 or later), or "": the
+    channel tells stories of the deep past, not of recent suffering. Each sentence of the title, hook and
+    narration that names such an event is dated, in this order:
+
+    1. by its own words - a 1900+ year or 'recently' blocks; a date before 1900 or an era word clears it;
+    2. by the ARTICLE the story is grounded in: the passage that tells the same event (and the sentences
+       before it in that paragraph) - a script that leaves the year out still tells a 1960 shooting;
+    3. by the script's own nearest earlier date (or any date in it).
+
+    An event that none of these dates is blocked too (fail closed): an undated "soldiers opened fire,
+    resulting in deaths" is not assumed to be old."""
+    text = "\n".join([script.title, script.hook_text] + [sc.narration for sc in script.scenes])
+    sentences = [x for x in re.split(r"(?<=[.!?;])\s+|\n", text) if x.strip()]
+    for i, sentence in enumerate(sentences):
+        v = _VIOLENCE_RE.search(sentence)
+        if not v:
+            continue
+        own = _date_kind(sentence)
+        if own == "recent":
+            r = _RECENT_RE.search(sentence)
             return f"recent violence or deaths: {v.group(0)!r} with {r.group(0)!r} in \"{sentence.strip()[:90]}\""
+        if own == "old":
+            continue
+        kind, ev = _article_date(sentence, article)
+        if not kind:
+            # A short line ("A protest turned deadly") shares too few words with the article: date the event
+            # from everything the script says about the violence.
+            told = " ".join(x for x in sentences if _VIOLENCE_RE.search(x))
+            kind, ev = _article_date(told, article)
+        if kind == "recent":
+            return (f"recent violence or deaths: {v.group(0)!r} in \"{sentence.strip()[:70]}\" - the article "
+                    f"dates it: \"{ev}\"")
+        if kind == "old":
+            continue
+        earlier = [_date_kind(x) for x in reversed(sentences[:i])]
+        ctx = next((k for k in earlier if k), "") or next((k for k in map(_date_kind, sentences[i + 1:]) if k), "")
+        if ctx == "old":
+            continue
+        why = "the script around it is dated 1900 or later" if ctx == "recent" else "nothing dates it"
+        return f"violence or deaths not shown to be old history: {v.group(0)!r} in \"{sentence.strip()[:80]}\" ({why})"
     return ""
 
 
@@ -792,7 +921,49 @@ def lint_script(script: Script, settings: Settings) -> list[str]:
             out.append(f"{fillers} filler words (basically, really, just...) slow the pace.")
         if script.style in FACTUAL_STYLES and not _NUMBER.search(script.narration):
             out.append("No concrete number anywhere; one precise figure makes facts land harder.")
+        if script.style in STORY_STYLES:
+            found = encyclopedia_phrases(script.narration)
+            if found:
+                out.append(f"Reads like an encyclopedia ({', '.join(repr(x) for x in found[:3])}); tell what "
+                           "happened instead.")
     return out
+
+
+def split_scenes(script: Script, seconds: list[float], max_seconds: float = 8.0, min_scenes: int = 6) -> Script:
+    """The same narration in more, shorter scenes, so the picture changes often enough: every scene whose
+    voice-over runs longer than ``max_seconds`` - and, while there are fewer than ``min_scenes``, the longest
+    one - is cut in two at the sentence boundary nearest its middle. ``seconds`` is each scene's spoken length.
+    The new scene keeps its parent's search_query, image_prompt and historical flag (each scene still gets
+    its own picture). A one-sentence scene is left whole. The words, and so the voice-over, do not change."""
+    scenes, secs = list(script.scenes), list(seconds)
+    if len(secs) != len(scenes):
+        return script
+
+    def halves(sc: Scene) -> tuple[str, str] | None:
+        parts = [p for p in re.split(r"(?<=[.!?;])\s+", sc.narration.strip()) if p]
+        if len(parts) < 2:
+            return None
+        total = sum(len(p) for p in parts)
+        best = min(range(1, len(parts)), key=lambda k: abs(sum(len(p) for p in parts[:k]) - total / 2))
+        return " ".join(parts[:best]), " ".join(parts[best:])
+
+    for _ in range(64):
+        order = sorted(range(len(scenes)), key=lambda i: -secs[i])
+        pick = next((i for i in order if secs[i] > max_seconds and halves(scenes[i])), None)
+        if pick is None and len(scenes) < min_scenes:
+            pick = next((i for i in order if halves(scenes[i])), None)
+        if pick is None:
+            break
+        sc = scenes[pick]
+        a, b = halves(sc)
+        share = len(a) / max(1, len(a) + len(b))
+        first = replace(sc, narration=a, emphasis=[e for e in sc.emphasis if e in a])
+        second = replace(sc, narration=b, emphasis=[e for e in sc.emphasis if e in b], emoji="")
+        scenes[pick:pick + 1] = [first, second]
+        secs[pick:pick + 1] = [secs[pick] * share, secs[pick] * (1 - share)]
+    if len(scenes) == len(script.scenes):
+        return script
+    return replace(script, scenes=scenes)
 
 
 def rubric_score(rubric: dict | None) -> int | None:
