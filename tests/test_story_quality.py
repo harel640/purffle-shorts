@@ -159,6 +159,15 @@ def test_modern_era_scenes_use_real_photos(text, modern):
     assert P.modern_scene(text) is modern
 
 
+def test_a_person_of_the_modern_era_stays_modern_in_the_next_scene():
+    texts = ["The caves were first carved in 366 CE as meditation chambers.",
+             "Behind the wall he found a small cave packed with manuscripts.",
+             "Aurel Stein, a British-Hungarian archaeologist, negotiated access in 1907.",
+             "Stein removed manuscripts, paintings and textiles for the restoration fund.",
+             "The caves of Mogao today limit visitors."]
+    assert P.modern_scenes(texts, "Mogao Caves China") == [False, False, True, True, True]
+
+
 # ------------------------------------------------------------------ 3c. the AI look comes from the article
 def test_scholars_is_not_chola():
     assert "gopuram" not in M.look_from_text("Somewhere", "Scholars studied the scrolls.").get("architecture", "")

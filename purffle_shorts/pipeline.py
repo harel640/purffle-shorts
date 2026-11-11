@@ -165,6 +165,23 @@ def modern_scene(narration: str) -> bool:
     return bool(_MODERN_RE.search(narration or ""))
 
 
+_NOT_A_NAME = {"The", "This", "That", "These", "Those", "Today", "In", "On", "At", "By", "For", "From", "With",
+               "When", "Which", "What", "Who", "Why", "How", "Its", "His", "Her", "Their", "Behind", "After", "Before",
+               "Inside", "Later", "Then", "Now", "Some", "Many", "One", "Two", "And", "But", "Would", "Could"}
+
+
+def modern_scenes(texts: list[str], place: str = "") -> list[bool]:
+    """modern_scene() for each scene, and also every scene that names a person a modern scene names: "Aurel
+    Stein ... negotiated access in 1907" makes the next line "Stein removed manuscripts" modern too, so it is
+    a real photo, not an AI scene of 1907. Words of the place's own name never carry it over."""
+    modern = [modern_scene(t) for t in texts]
+    skip = set(re.findall(r"[A-Z][a-z]+", place or "")) | _NOT_A_NAME
+    names = {w for t, m in zip(texts, modern) if m for w in re.findall(r"\b[A-Z][a-z]{2,}\b", t) if w not in skip}
+    if names:
+        modern = [m or any(re.search(rf"\b{re.escape(n)}\b", t) for n in names) for t, m in zip(texts, modern)]
+    return modern
+
+
 def plan_ai_scenes(historical: list[bool]) -> list[bool]:
     """Which scenes get an AI illustration vs a real photo. The first and last scene are always real photos,
     at most 5 scenes are AI, and at least ~40% of scenes are real. Extra AI scenes become real photos, dropped
@@ -869,8 +886,9 @@ class Studio:
                     # are only for the "history" format; the "place" format is present-day, real photos only.
                     # AI past scenes only for the "history" style, and kept grounded: first & last scene real,
                     # at least ~40% of scenes real, at most 5 AI scenes (see plan_ai_scenes).
-                    hist = plan_ai_scenes([bool(sc.historical) and script.style == "history"
-                                           and not modern_scene(sc.narration) for sc in script.scenes])
+                    modern = modern_scenes([sc.narration for sc in script.scenes], f"{place} {country}")
+                    hist = plan_ai_scenes([bool(sc.historical) and script.style == "history" and not m
+                                           for sc, m in zip(script.scenes, modern)])
                     scene_jobs = [(sc.search_query, sc.image_prompt, h) for sc, h in zip(script.scenes, hist)]
                     if script.scenes:
                         log.info("Scenes: %d total, %d AI, %d real photos (first & last real)",
