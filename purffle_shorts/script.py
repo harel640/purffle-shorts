@@ -281,8 +281,8 @@ def build_prompt(subject: str, style: str, settings: Settings, avoid: list[str],
               if story else
               "- The last scene lands the payoff, then a short call to action (max 8 words), e.g. asking viewers "
               "to comment or follow.\n")
-    length_rule = ("- This is a 45-60 second video: write BETWEEN 115 and 155 words total, and never fewer than "
-                   "115. Keep the middle tight — one turning point, no lists of rulers, names or battle details.\n"
+    length_rule = ("- This is a 45-60 second video: write BETWEEN 125 and 150 words total, and never fewer than "
+                   "125. Keep the middle tight — one turning point, no lists of rulers, names or battle details.\n"
                    if story else "")
     if history:
         visual_rules = (
@@ -344,7 +344,8 @@ def build_prompt(subject: str, style: str, settings: Settings, avoid: list[str],
                 "Do NOT add weather, sounds, light, smells, feelings, motives, crowds, materials, tools or "
                 "methods the background does not state. Do NOT turn something that \"can\" or \"may\" happen "
                 "into something that did, or \"some\" into \"thousands\". The drama must come from the real "
-                "facts: pick the most striking ones and tell them plainly.\n\n")
+                "facts: pick the most striking ones and tell them plainly. Write SHORT sentences, ONE fact "
+                "each (max 18 words), so a deleted sentence never takes true facts with it.\n\n")
     ins = f"{insights.strip()}\n\n" if insights else ""
     ins += f"{keywords.strip()}\n\n" if keywords else ""
     user = f"""Write one YouTube Short.
@@ -560,6 +561,10 @@ def fit_story_length(llm, script: Script, seconds: float, lo: float = HISTORY_RA
         return None
     rate = n / seconds                                          # words per second, as actually spoken
     lo_w, hi_w = int(rate * (lo + 2)), int(rate * (hi - 2))     # a little inside the window
+    if seconds < lo and source:
+        # What is added is checked against the source afterwards and some of it is deleted again: aim for the
+        # upper part of the window so the video still fits after that.
+        lo_w = int(rate * (lo + 7))
     verb = "too short" if seconds < lo else "too long"
     log.info("Voice-over is %.1fs (%s for %g-%gs); rewriting once to %d-%d words", seconds, verb, lo, hi,
              lo_w, hi_w)
@@ -577,15 +582,24 @@ def _resize_story(llm, script: Script, subject: str, lo_words: int, hi_words: in
     scene's search_query/image_prompt/historical flag, and every stated fact (no invented specifics). To get
     longer it may only add facts stated in ``source``: "vivid detail" used to be asked for here, and with no
     source to draw on the model made it up."""
-    grow = ("expand ONLY with facts stated in the SOURCE below (more of what happened, who, when, how big), "
-            "in plain words" if source else
-            "expand by telling what the draft already states more fully, adding no new facts")
+    # The existing sentences have already been checked against the source: they stay word for word, so the
+    # second check only has to judge what is new. (A free rewrite reworded verified sentences, the re-check
+    # dropped some of them, and the video ended up shorter than before.)
+    if why.startswith("too short"):
+        how = ("Keep EVERY existing sentence exactly as it is, word for word, in its scene. ADD new sentences "
+               "to the scenes where they fit: each new sentence is short (max 18 words) and states ONE fact "
+               + ("that the SOURCE below states and the draft does not tell yet (what happened, who, when, how "
+                  "big), in plain words" if source else
+                  "that the draft already implies, adding no new facts"))
+    else:
+        how = ("Shorten it by DELETING whole sentences or side clauses (repetition and side details first). "
+               "Do NOT reword the sentences that stay")
     system = ("You are a top YouTube Shorts scriptwriter and editor. You reply with a single JSON object "
               "and nothing else.")
     user = (
-        f"This {script.style} Short script is {why}. Rewrite the NARRATION of the scenes so the whole script "
-        f"is BETWEEN {lo_words} and {hi_words} words - {grow}, or cut "
-        f"repetition and side details, as needed. Keep the SAME title, hook_text, the SAME number of scenes and "
+        f"This {script.style} Short script is {why}. Change the NARRATION of the scenes so the whole script "
+        f"is BETWEEN {lo_words} and {hi_words} words. {how}. "
+        f"Keep the SAME title, hook_text, the SAME number of scenes and "
         f"their order, and each scene's search_query, image_prompt and historical flag unchanged. Do NOT invent "
         f"names, dates, numbers, events, weather, feelings or motives: every sentence is checked against the "
         f"source afterwards and an unsupported one is deleted. Keep the ending as ONE short, "

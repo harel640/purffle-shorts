@@ -177,9 +177,11 @@ def scrub(llm, script, settings):
 # into a storm night that swept a village downstream, and "carved" a chariot "from a single block" the article
 # never mentions. Numbers were clean, so ground() passed both. verify_claims() checks every SENTENCE.
 SOURCE_FETCH_CHARS = 24000        # how much of the article is fetched; quotes are verified against all of it
-# How much of it the checker is shown. The free Groq tier allows 8,000 tokens a minute, and the request has to
-# fit inside that with the script and the instructions, so the article is cut to its most relevant passages.
-CLAIM_SOURCE_CHARS = int(os.getenv("CLAIM_SOURCE_CHARS", "14000"))
+# How much of it the checker is shown. The free Groq tier allows 8,000 tokens a minute, and the whole request
+# (article + script + instructions) has to fit inside that, so the article is cut to its most relevant passages.
+# Counted in characters of plain Latin text (~4 per token); other characters cost more (see _cost).
+CLAIM_SOURCE_CHARS = int(os.getenv("CLAIM_SOURCE_CHARS", "9000"))
+CLAIM_REPLY_TOKENS = 3000         # max_tokens of the checker's reply (counts against the same 8,000)
 LEAD_CHARS = 5000                 # the part of the article the writer saw: always shown to the checker
 MIN_QUOTE_WORDS = 4               # a "quote" shorter than this proves nothing
 QUOTE_RUN = 0.7                   # a quote with a slip still counts if this share of it is one verbatim run
@@ -215,6 +217,9 @@ _CLAIMS_RULES = (
     "few\" into \"many\" or \"thousands\"; turning a description into a dramatic event; adding weather, "
     "emotions, motives, materials or methods the SOURCE does not mention; anything true that you know from "
     "elsewhere but the SOURCE does not say.\n"
+    "Words that only praise or decorate (beautiful, vibrant, breathtaking, famous, mighty) are not facts: "
+    "ignore them and judge the rest of the item. A claim about people, numbers or events is never decoration "
+    "(\"visitors from every continent\" is a claim).\n"
     "- not_factual: the item asserts nothing checkable - a question to the viewer, direct address, or a "
     "transition (\"Here is what happened next.\").\n"
     "If only part of an item is supported, the verdict is unsupported. \"quote\" is empty unless the verdict is "
@@ -243,6 +248,29 @@ class NothingSupported(RuntimeError):
     def __init__(self, message: str, report: dict | None = None):
         super().__init__(message)
         self.report = report or {}
+
+
+# Names in their own script (Tibetan, Chinese, Devanagari, Arabic ...) and IPA sit in most articles about Asia.
+# An English story never quotes them, and they cost a token or more per character: the Paro Taktsang article
+# came to 9,367 tokens and Groq refused it. They are taken out of the text the checker reads and is checked
+# against. Kept: Latin letters with their accents, digits, and ordinary punctuation.
+_FOREIGN_RE = re.compile("[^\u0000-\u024F\u1E00-\u1EFF\u2010-\u2027\u2030-\u205E]+")
+_EMPTY_BRACKETS_RE = re.compile(r"\(\s*[,;:/.\s]*\)|\[\s*[,;:/.\s]*\]")
+_TOO_LARGE_RE = re.compile(r"\b413\b|too large|context length|maximum context|reduce your message", re.I)
+
+
+def clean_source(text: str) -> str:
+    """The article without non-Latin scripts and the empty brackets they leave behind."""
+    t = _FOREIGN_RE.sub("", text or "")
+    t = _EMPTY_BRACKETS_RE.sub("", t)
+    return re.sub(r"[ \t]{2,}", " ", t).strip()
+
+
+def _cost(text: str) -> int:
+    """Rough size of ``text`` for the token budget, in characters of plain text: an accented or other
+    non-ASCII character is counted as four."""
+    plain = sum(c < "\u0080" for c in text)
+    return plain + 4 * (len(text) - plain)
 
 
 def _norm(text: str) -> str:
@@ -329,24 +357,24 @@ def select_source(source: str, script_text: str, budget: int = 0) -> str:
     the writer saw) plus the later paragraphs that share the most words with the script, in article order."""
     budget = budget or CLAIM_SOURCE_CHARS
     source = (source or "").strip()
-    if len(source) <= budget:
+    if _cost(source) <= budget:
         return source
     paras = [p for p in re.split(r"\n+", source) if p.strip()]
     wanted = set(_content_words(script_text))
     keep: set[int] = set()
     used = 0
     for i, p in enumerate(paras):                      # the lead, in order
-        if used + len(p) > min(LEAD_CHARS, budget):
+        if used + _cost(p) > min(LEAD_CHARS, budget):
             break
         keep.add(i)
-        used += len(p) + 1
+        used += _cost(p) + 1
     rest = [i for i in range(len(paras)) if i not in keep]
     rest.sort(key=lambda i: -(len(wanted & set(_content_words(paras[i]))) / (1 + len(paras[i]) / 600)))
     for i in rest:
-        if used + len(paras[i]) + 1 <= budget:
+        if used + _cost(paras[i]) + 1 <= budget:
             keep.add(i)
-            used += len(paras[i]) + 1
-    return "\n".join(paras[i] for i in sorted(keep)) or source[:budget]
+            used += _cost(paras[i]) + 1
+    return "\n".join(paras[i] for i in sorted(keep)) or source[:budget // 4]
 
 
 def claim_items(script, kinds: tuple[str, ...] = ("title", "hook", "description", "narration")) -> list[dict]:
@@ -374,7 +402,12 @@ def _ask(llm, items: list[dict], shown: str) -> dict[int, dict]:
               '"quote": "...", "unsupported_part": "..."}]}.\n\nITEMS:\n'
             + json.dumps([{"id": it["id"], "text": it["text"]} for it in items], ensure_ascii=False))
     try:
-        data = llm.complete_json(CLAIMS_SYSTEM, user, CLAIMS_SCHEMA, max_tokens=6000, temperature=0.0)
+        # Groq's free tier refuses a request whose prompt + max_tokens exceeds 8,000 (HTTP 413), so the reply
+        # budget is kept small - and the checker is asked for short reasoning (effort="low"): with the default
+        # it spent more than 3,500 hidden reasoning tokens and ran out before answering; with "low" it used
+        # 634 and gave the same verdicts.
+        data = llm.complete_json(CLAIMS_SYSTEM, user, CLAIMS_SCHEMA, max_tokens=CLAIM_REPLY_TOKENS, temperature=0.0,
+                                 effort="low")
     except Exception as e:  # noqa: BLE001
         raise FactCheckUnavailable(f"the claim checker could not be asked ({redact(e)})") from e
     rows = data.get("items") if isinstance(data, dict) else None
@@ -406,7 +439,7 @@ def _judge(item: dict, reply: dict | None, source_norm: str, source_digits: str,
     elif said == "supported":
         missing = _missing_names(text, source_norm, allow) if sentence else []
         if not quote_in_source(quote, source_norm):
-            row["reason"] = "the checker's quote is not in the source"
+            row["reason"] = f"the checker's quote is not in the source: \"{quote[:90]}\""
         elif numbers:
             row["reason"] = f"number not in the source: {', '.join(numbers)}"
         elif missing:
@@ -443,7 +476,7 @@ def _rewrite_headline(llm, script, quotes: list[str], which: list[str], title_le
         f"Current title: {script.title}\nCurrent hook_text: {script.hook_text}\n\nQUOTES from the source:\n"
         + "\n".join(f"- {q}" for q in quotes[:14]))
     d = llm.complete_json("You are a careful YouTube Shorts editor. Reply with strict JSON.", user,
-                          HEADLINE_SCHEMA, max_tokens=1500, temperature=0.2)
+                          HEADLINE_SCHEMA, max_tokens=2000, temperature=0.2, effort="low")
     return d if isinstance(d, dict) else {}
 
 
@@ -452,9 +485,16 @@ def _tidy(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[:limit].rsplit(" ", 1)[0].rstrip(" ,;:-")
 
 
+def accepted(reports: list[dict]) -> dict[str, dict]:
+    """{sentence: its row} for everything earlier checks accepted - handed to the next check as ``known`` so a
+    sentence that has not changed is not judged twice (the checker does not always repeat itself)."""
+    return {r["text"]: r for rep in reports or [] for r in rep.get("items", [])
+            if r.get("verdict") in ("supported", "not_factual")}
+
+
 def verify_claims(llm, script, source_text: str, *, place_words: str = "",
                   kinds: tuple[str, ...] = ("title", "hook", "description", "narration"),
-                  title_len: int = 60, strict: bool = True):
+                  title_len: int = 60, strict: bool = True, known: dict[str, dict] | None = None):
     """Claim-level fact check against the source article. Returns ``(script, report)``; mutates the script.
 
     Every unsupported narration sentence is removed (a scene left empty goes with it). An unsupported
@@ -464,7 +504,7 @@ def verify_claims(llm, script, source_text: str, *, place_words: str = "",
     Raises FactCheckUnavailable when the checker cannot be asked, and - when ``strict`` - NothingSupported when
     no narration survives or the title/hook still cannot be supported. With ``strict=False`` (the user chose
     the topic) an unsupportable title/hook is kept with a warning."""
-    source = (source_text or "").strip()
+    source = clean_source(source_text)
     if not source:
         raise FactCheckUnavailable("no source article to check the story against")
     items = claim_items(script, kinds)
@@ -473,10 +513,32 @@ def verify_claims(llm, script, source_text: str, *, place_words: str = "",
     source_norm = _norm(source)
     source_digits = _collapse(source.replace(",", "").lower())
     allow = frozenset(_norm(" ".join([place_words, script.topic or ""])).split())
-    shown = select_source(source, " ".join(it["text"] for it in items))
+    script_text = " ".join(it["text"] for it in items)
+    shown = select_source(source, script_text)
 
     def judge(batch: list[dict]) -> list[dict]:
-        replies = _ask(llm, batch, shown)
+        nonlocal shown
+        # Items an earlier check accepted, word for word, keep that verdict: only what is new is asked about.
+        carried = {it["id"]: {**(known or {})[it["text"]], **it, "carried": True}
+                   for it in batch if it["text"] in (known or {})}
+        ask = [it for it in batch if it["id"] not in carried]
+        if not ask:
+            return [carried[it["id"]] for it in batch]
+        fresh = judge_new(ask)
+        by_id = {r["id"]: r for r in fresh}
+        return [carried.get(it["id"]) or by_id[it["id"]] for it in batch]
+
+    def judge_new(batch: list[dict]) -> list[dict]:
+        nonlocal shown
+        try:
+            replies = _ask(llm, batch, shown)
+        except FactCheckUnavailable as e:
+            if not _TOO_LARGE_RE.search(str(e)) or _cost(shown) < 3000:
+                raise
+            # The provider refused the request as too big: ask once more with half as much of the article.
+            shown = select_source(source, script_text, max(2500, _cost(shown) // 2))
+            log.info("Claim check: the request was too large; retrying with %d chars of the article", len(shown))
+            replies = _ask(llm, batch, shown)
         return [_judge(it, replies.get(it["id"]), source_norm, source_digits, allow) for it in batch]
 
     rows = judge(items)

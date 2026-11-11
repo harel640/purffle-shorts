@@ -259,7 +259,7 @@ def test_place_style_is_a_present_day_story_with_no_ai_and_no_cta():
     assert "ALWAYS false" in user                            # every scene is present-day
     assert "no AI image is generated" in user
     assert "open question to the viewer" in user and "Never ask them to like" in user  # open question, no CTA
-    assert "115 and 155 words" in user                       # 45-60 seconds like history
+    assert "125 and 150 words" in user                       # 45-60 seconds like history
 
 
 def test_place_style_uses_story_length_and_scene_count():
@@ -271,7 +271,7 @@ def test_story_length_targets_45_to_60_seconds_and_a_tight_middle():
     assert SC.HISTORY_RANGE == (45, 60)
     assert SC.effective_seconds("history", 40) == 50 and SC.effective_seconds("place", 40) == 50
     _, user = SC.build_prompt("Hampi", "history", Settings(), avoid=[], context="x")
-    assert "45-60 second" in user and "115 and 155" in user
+    assert "45-60 second" in user and "125 and 150" in user
     assert "no lists of rulers" in user
 
 

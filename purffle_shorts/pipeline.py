@@ -450,7 +450,7 @@ class Studio:
         raise RuntimeError(f"All voice engines failed: {last}")
 
     def _claim_check(self, script: Script, pick: Topic, *, kinds: tuple[str, ...] | None = None,
-                     title_len: int = 60) -> Script:
+                     title_len: int = 60, known: dict | None = None) -> Script:
         """factcheck.verify_claims against the topic's article, fail CLOSED for the autopilot: if the checker
         can't be asked, or nothing supported is left, the topic is skipped. A topic the user chose by hand
         (EXPLICIT_SOURCES) goes on with a warning when the checker is down."""
@@ -460,7 +460,7 @@ class Studio:
             script, report = factcheck.verify_claims(
                 self.llm, script, pick.source_full or pick.source_text, place_words=place_words,
                 kinds=kinds or ("title", "hook", "description", "narration"), title_len=title_len,
-                strict=not explicit)
+                strict=not explicit, known=known)
         except factcheck.FactCheckUnavailable as e:
             if explicit:
                 log.warning("Claim check skipped (%s); the topic was chosen by hand, continuing", redact(e))
@@ -499,7 +499,9 @@ class Studio:
             script = fixed
             if source and s.fact_check and pick is not None:
                 script = factcheck.ground(script, source, s)
-                script = self._claim_check(script, pick, kinds=("narration",))
+                # sentences the first check accepted and the rewrite left alone are not judged again
+                script = self._claim_check(script, pick, kinds=("narration",),
+                                           known=factcheck.accepted(pick.claim_reports))
                 self._save_claims(folder, pick)
             (folder / "script.json").write_text(json.dumps(script.to_dict(), indent=2, ensure_ascii=False),
                                                 encoding="utf-8")
@@ -577,7 +579,13 @@ class Studio:
                                   keywords=seo.keywords_block(pick.keywords), place_title=place_locked_channel)
             if self.llm is not None and s.script_review != "off":
                 self._step("review", "Script Doctor")
-                script = review_script(self.llm, script, s)
+                # The Script Doctor rewrites without seeing the article. For a story that is checked against
+                # its article it only SCORES: its rewrites added scaffolding, rice offerings and "first
+                # pilgrims" the article never mentions, and the claim check then deleted most of the script.
+                checked_story = (not s.offline and s.fact_check and script.style in STORY_STYLES
+                                 and bool(pick.source_full or pick.source_text))
+                script = review_script(self.llm, script,
+                                       replace(s, script_review="score") if checked_story else s)
             checking = self.llm is not None and not s.offline and s.fact_check
             source_article = pick.source_full or pick.source_text
             # Stories are checked claim by claim against their article. Other formats (a quiz's wrong answers,

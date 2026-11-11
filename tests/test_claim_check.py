@@ -58,9 +58,10 @@ class Checker:
         self.table, self.headline, self.fail, self.skip_ids = table or {}, headline, fail, set(skip_ids)
         self.prompts, self.rewrites = [], 0
 
-    def complete_json(self, system, user, schema=None, max_tokens=0, temperature=None):
+    def complete_json(self, system, user, schema=None, max_tokens=0, temperature=None, effort=None):
         if self.fail:
             raise RuntimeError("All LLM providers failed")
+        assert effort == "low" and max_tokens <= 3000          # must fit Groq's 8,000 tokens a minute
         if schema is factcheck.HEADLINE_SCHEMA:
             self.rewrites += 1
             self.prompts.append(user)
@@ -239,6 +240,57 @@ def test_a_long_article_keeps_its_lead_and_the_passages_the_script_talks_about()
     assert factcheck.select_source("short article", "anything") == "short article"
 
 
+def test_foreign_scripts_are_taken_out_and_a_too_large_request_is_retried_smaller():
+    article = ("Paro Taktsang (Dzongkha: \u0f66\u0fa4\u0f71\u0f0b\u0f62\u0f7c\u0f0b\u0f66\u0f9f\u0f42\u0f0b"
+               "\u0f5a\u0f44\u0f0b; \u864e\u7a74\u5bfa) is a sacred Vajrayana site built on a cliff in Bhutan. "
+               "The caf\u00e9 below serves tea.")
+    clean = factcheck.clean_source(article)
+    assert clean == ("Paro Taktsang (Dzongkha: ; ) is a sacred Vajrayana site built on a cliff in Bhutan. "
+                     "The caf\u00e9 below serves tea.")                          # Latin accents stay
+    assert factcheck._cost("\u0f66\u0fa4") == 8 and factcheck._cost("abc") == 3
+
+    class Fussy(Checker):                       # refuses the first, full-size request like Groq's HTTP 413
+        sizes = []
+
+        def complete_json(self, system, user, schema=None, **k):
+            self.sizes.append(len(user))
+            if len(self.sizes) == 1:
+                raise RuntimeError("groq: HTTP 413 Request too large for model, please reduce your message size")
+            return super().complete_json(system, user, schema, **k)
+
+    long = KAMPONG_AYER + "\n" + "\n".join(f"Paragraph {i} about boats, markets and weather. " * 8 for i in range(40))
+    sc = _script(["Kampong Ayer stands on stilts above the Brunei River.", TRUE_NOORT])
+    llm = Fussy(dict(BASE))
+    out, report = factcheck.verify_claims(llm, sc, long, place_words="Kampong Ayer")
+    assert len(llm.sizes) == 2 and llm.sizes[1] < llm.sizes[0] * 0.75           # asked again with less article
+    assert TRUE_NOORT in out.narration and report["shown_chars"] < len(long) / 2
+
+
+def test_a_sentence_an_earlier_check_accepted_is_not_judged_again():
+    first = "Kampong Ayer stands on stilts above the Brunei River."
+    sc = _script([first, TRUE_NOORT])
+    llm = Checker(dict(BASE))
+    _out, report = factcheck.verify_claims(llm, sc, KAMPONG_AYER, place_words="Kampong Ayer")
+    known = factcheck.accepted([report])
+    assert first in known and TRUE_NOORT in known
+
+    class Changed(Checker):                 # this time the checker would refuse everything it is asked about
+        def complete_json(self, system, user, schema=None, **k):
+            asked = [it["text"] for it in json.loads(user.rsplit("ITEMS:\n", 1)[1])]
+            assert first not in asked and TRUE_NOORT not in asked          # the verified ones are not sent
+            return super().complete_json(system, user, schema, **k)
+
+    sc2 = _script([first, TRUE_NOORT + " " + INVENTED[2]])
+    out, report2 = factcheck.verify_claims(Changed({}), sc2, KAMPONG_AYER, kinds=("narration",), known=known)
+    assert first in out.narration and TRUE_NOORT in out.narration and INVENTED[2] not in out.narration
+    assert sum(bool(r.get("carried")) for r in report2["items"]) == 2
+    # nothing new at all -> no call
+    silent = Checker(fail=True)
+    out, _ = factcheck.verify_claims(silent, _script([first, TRUE_NOORT]), KAMPONG_AYER, kinds=("narration",),
+                                     known=known)
+    assert out.narration == first + " " + TRUE_NOORT
+
+
 def test_only_the_narration_is_checked_when_asked():
     llm = Checker(dict(BASE))
     sc = _script(["Kampong Ayer stands on stilts above the Brunei River."], title="A storm swept a village away")
@@ -317,10 +369,16 @@ def test_length_rewrite_prompt_takes_facts_from_the_source_not_from_imagination(
 
     sc = _script(["Kampong Ayer stands on stilts above the Brunei River."])
     fit_story_length(LLM(), sc, seconds=4.0, source=KAMPONG_AYER)
-    assert "ONLY with facts stated in the SOURCE" in seen["user"] and "light piles" in seen["user"]
+    assert "that the SOURCE below states" in seen["user"] and "light piles" in seen["user"]
+    assert "Keep EVERY existing sentence exactly as it is" in seen["user"]       # verified sentences stay
     assert "vivid" not in seen["user"]
     fit_story_length(LLM(), sc, seconds=4.0)                     # no article: nothing new may be added at all
     assert "adding no new facts" in seen["user"] and "vivid" not in seen["user"]
+    words = len(sc.narration.split())
+    fit_story_length(LLM(), sc, seconds=4.0, source=KAMPONG_AYER)
+    assert f"BETWEEN {int(words / 4.0 * 52)} and {int(words / 4.0 * 58)} words" in seen["user"]   # aims high
+    fit_story_length(LLM(), sc, seconds=90.0, source=KAMPONG_AYER)               # too long: cut, don't reword
+    assert "DELETING whole sentences" in seen["user"] and "Do NOT reword" in seen["user"]
 
 
 def test_the_writer_and_the_script_doctor_are_told_not_to_add_what_the_source_lacks():
@@ -361,13 +419,16 @@ def test_draft_checks_claims_last_so_the_hook_rewrite_is_covered(monkeypatch, tm
     real = factcheck.verify_claims
     monkeypatch.setattr(factcheck, "verify_claims", lambda *a, **k: (order.append("claims"), real(*a, **k))[1])
     monkeypatch.setattr(factcheck, "scrub", lambda *a, **k: pytest.fail("the source-less pass must not run"))
+    modes = []
+    monkeypatch.setattr(P, "review_script", lambda llm, script, s: (modes.append(s.script_review), script)[1])
     st = P.Studio(Settings(output_dir=str(tmp_path / "o"), data_dir=str(tmp_path / "d"), upload=False,
-                           visual_sources=["wikimedia"], script_review="off", safety_filter=False,
+                           visual_sources=["wikimedia"], script_review="rewrite", safety_filter=False,
                            seo_keywords=False, style="auto"))
     st._llm = Checker(dict(BASE))
     st._llm.last_used, st._llm.label = "fake", "fake"
     script, got, _writer = st.draft()
     assert order == ["hook", "claims"]
+    assert modes == ["score"]                 # the Script Doctor scores a checked story, it does not rewrite it
     assert INVENTED[2] not in script.narration and TRUE_NOORT in script.narration
     assert got.claim_reports and got.claim_reports[0]["counts"]["unsupported"] == 1
     assert got.source_text == KAMPONG_AYER[:400]                 # the writer still reads the short version
@@ -399,3 +460,85 @@ def test_grounding_keeps_more_of_the_article_for_the_checker_than_for_the_writer
     text, _ = P.grounding_article(pick)
     assert seen["max"] == factcheck.SOURCE_FETCH_CHARS
     assert len(text) == P.WRITER_SOURCE_CHARS and len(pick.source_full) == len(long)
+
+
+# ------------------------------------------------------------------ fitting Groq's 8,000 tokens a minute
+class _Prov:
+    """A provider double that records how it was called. ``script``: replies/exceptions, one per call."""
+
+    def __init__(self, name, script, effort=True):
+        self.name, self.model, self.script, self.seen, self._effort = name, "openai/gpt-oss-120b", list(script), [], effort
+
+    def __str__(self):
+        return f"{self.name}:m"
+
+    def takes_effort(self):
+        return self._effort
+
+    def complete(self, system, user, **k):
+        self.seen.append(k)
+        r = self.script.pop(0) if self.script else '{"ok": true}'
+        if isinstance(r, Exception):
+            raise r
+        return r
+
+
+def _client(*providers, monkeypatch):
+    from purffle_shorts import llm as L
+    monkeypatch.setattr(L.time, "sleep", lambda s: None)
+    monkeypatch.setattr(L, "with_retries", lambda fn, attempts=2, **k: fn())
+    obj = L.LLM.__new__(L.LLM)
+    obj.settings, obj.last_used, obj.providers = Settings(), "", list(providers)
+    return obj
+
+
+def test_reasoning_effort_reaches_only_a_provider_that_takes_it(monkeypatch):
+    groq = _Prov("groq", [])
+    assert _client(groq, monkeypatch=monkeypatch).complete_json("s", "u", effort="low") == {"ok": True}
+    assert groq.seen[0]["effort"] == "low"
+    other = _Prov("gemini", [], effort=False)
+    _client(other, monkeypatch=monkeypatch).complete_json("s", "u", effort="low")
+    assert "effort" not in other.seen[0]                         # providers without the option are not handed it
+    plain = _Prov("groq", [])
+    _client(plain, monkeypatch=monkeypatch).complete_json("s", "u")
+    assert "effort" not in plain.seen[0]                         # and nothing changes for callers that don't ask
+
+
+def test_a_request_groq_calls_too_large_is_retried_once_small_with_low_effort(monkeypatch):
+    too_large = RuntimeError("groq:m: HTTP 413 Request too large for model on tokens per minute (TPM): "
+                             "Limit 8000, Requested 8569")
+    groq = _Prov("groq", [too_large])
+    assert _client(groq, monkeypatch=monkeypatch).complete_json("s", "u", max_tokens=12000) == {"ok": True}
+    assert len(groq.seen) == 2
+    assert groq.seen[0]["max_tokens"] == 12000 and "effort" not in groq.seen[0]
+    assert groq.seen[1]["max_tokens"] == 4000 and groq.seen[1]["effort"] == "low"
+    twice = _Prov("groq", [too_large, too_large])                # still too large: no endless loop
+    from purffle_shorts.llm import LLMError
+    with pytest.raises(LLMError):
+        _client(twice, monkeypatch=monkeypatch).complete_json("s", "u", max_tokens=12000)
+    assert len(twice.seen) == 2
+
+
+def test_groq_payload_carries_reasoning_effort_only_for_gpt_oss(monkeypatch):
+    from purffle_shorts import llm as L
+    sent = []
+
+    class Resp:
+        status_code, text = 200, ""
+
+        def json(self):
+            return {"choices": [{"message": {"content": "{}"}}]}
+
+    class Session:
+        def post(self, url, json=None, headers=None, timeout=None):
+            sent.append(json)
+            return Resp()
+
+    monkeypatch.setattr(L, "http", lambda: Session())
+    groq = L.PRESETS["groq"]
+    oss = L.OpenAICompatible(groq, "openai/gpt-oss-120b", "k", "https://x")
+    oss.complete("s", "u", effort="low")
+    assert sent[-1]["reasoning_effort"] == "low" and oss.takes_effort()
+    llama = L.OpenAICompatible(groq, "llama-3.3-70b-versatile", "k", "https://x")
+    llama.complete("s", "u", effort="low")
+    assert "reasoning_effort" not in sent[-1] and not llama.takes_effort()
