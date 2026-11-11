@@ -64,7 +64,7 @@ def test_safety_skips_when_region_unknown(monkeypatch):
     # Fail CLOSED: India has Level 3-4 areas, so an unresolved region is skipped.
     monkeypatch.setattr(safety, "advisories", lambda: FEED)
     v = safety.check("Somewhere in India", FakeLLM({"country": "India", "aliases": [], "region": ""}))
-    assert v.unsafe and "region could not be determined" in v.reason.lower()
+    assert v.unsafe and "neither the region nor the coordinates" in v.reason.lower()
 
 
 def test_safety_no_regional_check_for_plain_country(monkeypatch):

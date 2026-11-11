@@ -453,25 +453,32 @@ class Studio:
     def _listed(pick: Topic) -> bool:
         return pick.source == "list" and bool(pick.country)
 
-    def _advisory(self, pick: Topic, *, place: str = "", country: str = "") -> safety.Verdict:
+    def _advisory(self, pick: Topic, *, place: str = "", country: str = "",
+                  coords: tuple[float, float] | None = None) -> safety.Verdict:
         """The travel-advisory verdict for this topic - before the script (no ``place``) or for the place the
         video resolved to. Fails CLOSED.
 
-        A listed place is decided from the list's own country and region, with no LLM (the same rule the Scout
-        vetted it with, against today's feed). If the video resolved to a different country than the list
-        says, it is skipped: the place is not the one that was vetted. Any other topic is located by the LLM;
-        at the produce stage the resolved place must be in a known country."""
+        A listed place is decided from the list's own country, region, name and coordinates, with no LLM (the
+        same rule the Scout vetted it with, against today's feed). If the video resolved to a different country
+        than the list says, it is skipped: the place is not the one that was vetted. Any other topic is located
+        by the LLM; at the produce stage the resolved place must be in a known country, and its coordinates are
+        checked against the warned areas as well as its names."""
+        lat, lon = coords if coords else (None, None)
         if self._listed(pick):
             if country and not safety.same_country(country, pick.country):
                 return safety.Verdict(True, f"the video resolved to {place}, {country}, but the list vetted "
                                             f"{pick.place or pick.subject} in {pick.country}")
-            v = safety.verdict_for(safety.country_names(pick.country), pick.region)
+            if lat is None and pick.lat is not None and pick.lon is not None:
+                lat, lon = pick.lat, pick.lon
+            names = " | ".join(x for x in (pick.place, pick.subject, place) if x)
+            v = safety.verdict_for(safety.country_names(pick.country), pick.region, place=names, lat=lat, lon=lon)
             if not v.unsafe:
                 log.info("Safety: listed place in %s%s - %s", pick.country,
                          f" ({pick.region})" if pick.region else "", f"Level {v.level}, ok" if v.level else "ok")
             return v
         if place:
-            return safety.check(", ".join(x for x in (place, country) if x), self.llm, require_place=True)
+            return safety.check(", ".join(x for x in (place, country) if x), self.llm, require_place=True,
+                                lat=lat, lon=lon)
         return safety.check(pick.subject, self.llm)
 
     def _release_if_transient(self, pick: Topic, e: BaseException) -> None:
@@ -752,14 +759,15 @@ class Studio:
                     # Fail closed: without the place we can't guarantee place-accurate, attributed visuals.
                     raise SkipTopic("could not identify the place for place-accurate visuals")
                 log.info("Place: %s", ", ".join(x for x in (place, country) if x))
-                if s.safety_filter:
-                    v = self._advisory(pick, place=place, country=country)
-                    if v.unsafe:
-                        raise safety.unsafe_topic(v)
                 # Coordinates: a listed place's own article; otherwise the best-matching article for the place.
+                # Found BEFORE the advisory check, which tests them against the warned areas.
                 coords = ((pick.lat, pick.lon) if pick.lat is not None and pick.lon is not None else
                           topics.place_coordinates(", ".join(x for x in (place, country) if x) or place,
                                                    s.language.split("-")[0]))
+                if s.safety_filter:
+                    v = self._advisory(pick, place=place, country=country, coords=coords)
+                    if v.unsafe:
+                        raise safety.unsafe_topic(v)
                 # Don't let the autopilot repeat a place made recently: the same Wikipedia page or coordinates
                 # (two names for one place), not a shared word. A user who explicitly asks for a topic (source
                 # "manual"/url/document) is never blocked.
