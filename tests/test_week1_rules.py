@@ -148,7 +148,7 @@ def _studio(tmp_path, durations, fit):
 def test_length_gate(monkeypatch, tmp_path, first, after, ok):
     calls = []
 
-    def fit(llm, script, seconds, lo, hi):
+    def fit(llm, script, seconds, lo, hi, **k):
         calls.append(seconds)
         return script
 

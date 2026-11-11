@@ -180,8 +180,8 @@ def test_fit_story_length_resizes_once_at_the_real_speaking_rate():
     fixed = fit_story_length(LLM(), short, seconds=4.0)
     assert fixed is not None and word_count(fixed.narration, "en") > 100
     assert fixed.title == short.title                                       # only the length changed
-    n = word_count(short.narration, "en")
-    rate = n / 4.0
+    from purffle_shorts.script import STORY_VOICE_WPS
+    rate = STORY_VOICE_WPS                     # ~10 words are too few to measure the voice's pace from
     assert f"BETWEEN {int(rate * 47)} and {int(rate * 58)} words" in seen["user"] and "too short" in seen["user"]
     long = normalize(_story_data(_LONG), "Hampi", "history", "en")
     fit_story_length(LLM(), long, seconds=75.0)

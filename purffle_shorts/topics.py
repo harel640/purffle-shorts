@@ -51,6 +51,8 @@ class Topic:
     keywords: list[str] = field(default_factory=list)  # real YouTube searches handed to the script writer
     source_url: str = ""     # the grounding article's URL (shown in the description, saved in metadata)
     source_text: str = ""    # the grounding article's plain text (facts must come from here, not be invented)
+    source_full: str = ""    # more of the same article (factcheck.SOURCE_FETCH_CHARS): what claims are checked against
+    claim_reports: list = field(default_factory=list)   # factcheck.verify_claims reports (saved as claims.json)
     # A place from a ranked list: its exact Wikipedia article and coordinates (looked up, never searched for).
     wiki_title: str = ""
     place: str = ""

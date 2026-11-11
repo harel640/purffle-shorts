@@ -26,6 +26,27 @@ GROQ_RATE_LIMIT_WAIT = 60.0
 GROQ_RATE_LIMIT_RETRIES = 3
 
 
+# Groq's free tier allows 8,000 tokens a minute for this model, and refuses outright (HTTP 413 "Request too
+# large") a request it sizes above that. Its open-weight reasoning models (openai/gpt-oss-*) spend thousands of
+# hidden reasoning tokens per reply - 2,926 for one script - which count against the same limit and against
+# max_tokens ("max completion tokens reached before generating a valid document"). ``effort="low"`` asks for
+# short reasoning; it is used for checking tasks, and for the one retry after a 413 when little room is left.
+GROQ_TPM_LIMIT = int(os.getenv("GROQ_TPM_LIMIT", "8000"))
+
+
+def _fitting_reply_tokens(system: str, user: str, limit: int = 0) -> int:
+    """The largest max_tokens with which a Groq request is sure to be accepted: Groq sizes a request whose
+    max_tokens fits as prompt + max_tokens. The prompt is estimated generously (3.4 characters a token; the
+    story writer's 11,226 characters were 3,085 tokens)."""
+    prompt = int((len(system) + len(user)) / 3.4) + 150
+    return (limit or GROQ_TPM_LIMIT) - prompt - 200
+
+
+def _is_too_large(error: Exception) -> bool:
+    t = str(error).lower()
+    return "413" in t or "request too large" in t
+
+
 def _is_per_minute_rate_limit(error: Exception) -> bool:
     """True for a per-minute token/request rate limit (worth a 60s wait), not a daily/quota cap."""
     t = str(error).lower()
@@ -229,6 +250,10 @@ class Provider:
                  temperature: float = 0.9, max_tokens: int = 4000) -> str:
         raise NotImplementedError
 
+    def takes_effort(self) -> bool:
+        """True if complete() accepts ``effort`` (a reasoning-effort hint: low | medium | high)."""
+        return False
+
     def __str__(self) -> str:
         return f"{self.name}:{self.model}"
 
@@ -243,11 +268,16 @@ class OpenAICompatible(Provider):
     def _is_reasoning_model(self) -> bool:
         return bool(re.match(r"^(o\d|gpt-5)", self.model.split("/")[-1]))
 
-    def complete(self, system, user, *, schema=None, temperature=0.9, max_tokens=4000) -> str:
+    def takes_effort(self) -> bool:
+        return self.name == "groq" and "gpt-oss" in self.model
+
+    def complete(self, system, user, *, schema=None, temperature=0.9, max_tokens=4000, effort=None) -> str:
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
         }
+        if effort and self.takes_effort():
+            payload["reasoning_effort"] = effort
         if self._is_reasoning_model():
             payload["max_completion_tokens"] = max(max_tokens, 8000)  # room for hidden reasoning tokens
         else:
@@ -284,7 +314,8 @@ class OpenAICompatible(Provider):
                     log.info("%s: no strict JSON schema support; using JSON mode", self)
                 else:
                     self._json_mode = False
-                return self.complete(system, user, schema=schema, temperature=temperature, max_tokens=max_tokens)
+                return self.complete(system, user, schema=schema, temperature=temperature, max_tokens=max_tokens,
+                                     effort=effort)
             raise
         data = r.json()
         try:
@@ -444,9 +475,12 @@ class LLM:
         return str(self.providers[0])
 
     def complete_json(self, system: str, user: str, schema: dict | None = None,
-                      max_tokens: int = 4000, temperature: float | None = None) -> dict[str, Any]:
-        """``temperature`` overrides LLM_TEMPERATURE for this call (low for grading, where repeatability matters)."""
+                      max_tokens: int = 4000, temperature: float | None = None,
+                      effort: str | None = None) -> dict[str, Any]:
+        """``temperature`` overrides LLM_TEMPERATURE for this call (low for grading, where repeatability matters).
+        ``effort`` ("low") asks a reasoning model for short reasoning, where the provider supports it."""
         errors: list[str] = []
+        shrunk: set[int] = set()           # providers already retried once after "request too large"
         temp = self.settings.llm_temperature if temperature is None else temperature
         # Providers whose circuit is open go last: they are tried only if every other provider fails.
         providers = ([p for p in self.providers if not self.circuit_open(p.name)]
@@ -456,11 +490,20 @@ class LLM:
         while i < len(providers):
             p = providers[i]
 
-            def _call(p=p):
+            takes_effort = getattr(p, "takes_effort", lambda: False)()
+
+            # After a "request too large": a reply budget that is sure to fit. The model keeps its normal
+            # reasoning when that leaves it room (a script written with low effort came out mostly invented);
+            # only a tight budget asks for short reasoning.
+            fit = min(max_tokens, _fitting_reply_tokens(system, user)) if i in shrunk else max_tokens
+            small_effort = "low" if i in shrunk and fit < 3800 else effort
+
+            def _call(p=p, fit=fit, small_effort=small_effort, takes_effort=takes_effort):
                 t0 = time.time()
+                extra = {"effort": small_effort} if small_effort and takes_effort else {}
                 try:
                     text = p.complete(system, user, schema=schema if schema is not None else {},
-                                      max_tokens=max_tokens, temperature=temp)
+                                      max_tokens=fit, temperature=temp, **extra)
                 except Exception as e:
                     self.note_failure(p.name, e)
                     raise
@@ -480,6 +523,14 @@ class LLM:
                 if healed is not None:
                     log.info("%s model '%s' unavailable; retrying with '%s'", p.name, p.model, healed.model)
                     providers[i] = healed
+                    continue
+                # Groq sized the request above its per-minute limit: ask once more for a short reply with
+                # short reasoning, which it sizes as prompt + max_tokens.
+                if (p.name == "groq" and _is_too_large(e) and i not in shrunk
+                        and _fitting_reply_tokens(system, user) >= 1500):
+                    shrunk.add(i)
+                    log.warning("Groq refused the request as too large; retrying once with a %d-token reply",
+                                min(max_tokens, _fitting_reply_tokens(system, user)))
                     continue
                 # The Groq backup gets per-minute rate-limited on the free tier: that clears within a minute,
                 # so wait 60s and retry (up to 3 times) instead of skipping the video.

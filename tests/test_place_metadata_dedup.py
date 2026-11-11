@@ -41,18 +41,18 @@ def test_article_page_looks_up_the_exact_title_never_searches(monkeypatch):
 def test_list_place_is_grounded_in_its_own_article_or_skipped(monkeypatch):
     pick = T.Topic("Ban Rak Thai, Mae Hong Son, Thailand", "list", wiki_title="Ban Rak Thai")
     monkeypatch.setattr(T, "article", lambda *a, **k: pytest.fail("a listed place must not be searched for"))
-    monkeypatch.setattr(T, "article_page", lambda title, lang="en": {
+    monkeypatch.setattr(T, "article_page", lambda title, lang="en", **k: {
         "title": "Ban Rak Thai", "url": "https://en.wikipedia.org/wiki/Ban_Rak_Thai",
         "text": "Ban Rak Thai is a Yunnanese village.", "lat": 19.6, "lon": 97.9})
     text, url = grounding_article(pick)
     assert "Yunnanese village" in text and url.endswith("/Ban_Rak_Thai") and pick.lat == 19.6
-    monkeypatch.setattr(T, "article_page", lambda title, lang="en": None)
+    monkeypatch.setattr(T, "article_page", lambda title, lang="en", **k: None)
     with pytest.raises(SkipTopic, match="not found"):           # missing: skip, never fall back to a search
         grounding_article(T.Topic("x", "list", wiki_title="Nope"))
 
 
 def test_other_topics_still_use_the_search(monkeypatch):
-    monkeypatch.setattr(T, "article", lambda q, lang="en": ("text about " + q, "https://en.wikipedia.org/wiki/Q"))
+    monkeypatch.setattr(T, "article", lambda q, lang="en", **k: ("text about " + q, "https://en.wikipedia.org/wiki/Q"))
     assert grounding_article(T.Topic("Hampi", "niche"))[0] == "text about Hampi"
 
 
