@@ -57,6 +57,7 @@ class Topic:
     wiki_title: str = ""
     place: str = ""
     country: str = ""
+    region: str = ""         # a listed place's state/province (from the list): the advisory check needs no LLM
     lat: float | None = None
     lon: float | None = None
 
@@ -344,7 +345,7 @@ def from_list(settings: Settings, history: History) -> Topic | None:
         subject = list_subject(place, region, country)
         log.info("Topic list: #%s %s", e.get("rank", "?"), subject)
         return Topic(subject, "list", key=key, wiki_title=str(e.get("wikipedia_title") or ""), place=place,
-                     country=country, lat=lat if isinstance(lat, (int, float)) else None,
+                     country=country, region=region, lat=lat if isinstance(lat, (int, float)) else None,
                      lon=lon if isinstance(lon, (int, float)) else None)
     log.info("Every place in topic list %s is used; using the normal topic sources", p)
     return None

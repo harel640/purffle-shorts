@@ -2,12 +2,15 @@
 
 Before a script is written, skip any destination under an active "Reconsider Travel"
 (Level 3) or "Do Not Travel" (Level 4) advisory, read from the official US Department of
-State travel-advisories RSS feed. The country is identified from the topic by the LLM.
+State travel-advisories RSS feed. A place from the Scout's list carries its country and region,
+so it is decided without an LLM (verdict_for). Any other topic is located by the LLM (check).
 
-Fail-CLOSED: once a topic is identified as a specific destination, it is skipped unless the
-advisory can be read and is Level 1-2. A feed outage or a country missing from the feed
-therefore skips that destination (the autopilot picks another) rather than risking an unsafe
-one. Topics that are not about a specific country are never blocked.
+Fail-CLOSED, always: a destination is skipped unless its advisory can be read and is Level 1-2.
+A feed outage, a country missing from the feed, an unknown region in a country with Level 3-4
+areas, and an LLM that cannot be asked where the topic is all skip it (the autopilot picks
+another) rather than risk an unsafe one. Outages are marked ``transient`` so a listed place is
+tried again later instead of being used up. Only a topic the LLM itself says is not about one
+specific place is let through - and never at the produce stage, where the place must be known.
 """
 
 from __future__ import annotations
@@ -112,7 +115,16 @@ _cache: dict = {"ts": 0.0, "data": None}
 
 
 class UnsafeTopic(Exception):
-    """Raised when a destination is under, or cannot be cleared of, a travel advisory."""
+    """Raised when a destination is under, or cannot be cleared of, a travel advisory. ``transient``: it could
+    not be cleared because something was down (LLM, advisory feed) - worth trying again later."""
+
+    def __init__(self, reason: str = "", transient: bool = False):
+        super().__init__(reason)
+        self.transient = transient
+
+
+class LocationUnavailable(RuntimeError):
+    """The LLM could not be asked where a topic is (every provider failed). Not the same as 'not a place'."""
 
 
 @dataclass
@@ -121,6 +133,11 @@ class Verdict:
     reason: str = ""
     country: str = ""
     level: int = 0
+    transient: bool = False     # unsafe only because something was down: may pass on a later run
+
+
+def unsafe_topic(v: Verdict) -> UnsafeTopic:
+    return UnsafeTopic(v.reason, transient=v.transient)
 
 
 def _feed_text() -> str:
@@ -256,20 +273,32 @@ _IDENTIFY_SCHEMA = {
 }
 
 
+# The reply is ~60 tokens of JSON, but Groq's gpt-oss models first spend 110-355 hidden reasoning tokens on
+# it, and those count against max_tokens. At the old 250 the call failed with HTTP 400 ("Failed to validate
+# JSON", nothing generated) whenever the reasoning ran long - "Fort Pilar, Zamboanga City, Philippines" failed
+# 2 of 3 times - and check() then let the topic through. The client also sets a floor for such models.
+IDENTIFY_MAX_TOKENS = 1500
+
+
 def _identify(topic: str, llm) -> tuple[list[str], str]:
     """(lower-cased country names incl. aliases, lower-cased region/state) the topic is about.
-    Returns ([], "") when the topic is not about one specific real place."""
+    Returns ([], "") when the LLM says the topic is not about one specific real place, and raises
+    LocationUnavailable when the LLM could not be asked (or its reply was unusable)."""
     system = "You identify where a travel topic is. Reply only with strict JSON."
     user = ('Return STRICT JSON {"country": "<name or empty>", "aliases": ["other names, including the '
             'official US State Department name if different, e.g. Burma for Myanmar"], '
             '"region": "<the state/province/region within the country the place is in, or empty>"}. '
             'If the topic is not about one specific real country/place, return an empty country.\nTopic: ' + topic)
     try:
-        data = llm.complete_json(system, user, schema=_IDENTIFY_SCHEMA, max_tokens=250, temperature=0.0)
+        data = llm.complete_json(system, user, schema=_IDENTIFY_SCHEMA, max_tokens=IDENTIFY_MAX_TOKENS,
+                                 temperature=0.0)
     except Exception as e:
-        log.warning("Safety: could not determine location for %r (%s)", topic, redact(e))
-        return [], ""
-    if not isinstance(data, dict) or not str(data.get("country", "")).strip():
+        log.warning("Safety: could not determine location for %r (%s); failing CLOSED", topic, redact(e))
+        raise LocationUnavailable(redact(e)) from e
+    if not isinstance(data, dict):
+        log.warning("Safety: unusable location reply for %r; failing CLOSED", topic)
+        raise LocationUnavailable("unusable reply")
+    if not str(data.get("country", "")).strip():
         return [], ""
     names = country_names(str(data.get("country", "")), [str(a) for a in (data.get("aliases") or [])])
     return names, str(data.get("region", "")).strip().lower()
@@ -303,11 +332,24 @@ def _match_level(names: list[str], feed: dict[str, int]) -> tuple[int | None, st
     return None, ""
 
 
-def check(topic: str, llm) -> Verdict:
-    names, region = _identify(topic, llm)
+def check(topic: str, llm, *, require_place: bool = False) -> Verdict:
+    """The advisory decision for a topic located by the LLM. Fails CLOSED when the LLM can't be asked
+    (transient). ``require_place``: the topic must be a real place (e.g. the resolved place of a video) - the
+    LLM finding no country is then a reason to skip, not a pass."""
+    try:
+        names, region = _identify(topic, llm)
+    except LocationUnavailable as e:
+        return Verdict(True, f"the location could not be verified ({str(e)[:120]})", transient=True)
     if not names:
-        return Verdict(False)  # not a specific destination -> nothing to check
+        if require_place:
+            return Verdict(True, f"could not tell which country {topic!r} is in")
+        return Verdict(False)  # the LLM says it is not one specific destination: there is no advisory to read
     return verdict_for(names, region)
+
+
+def same_country(a: str, b: str) -> bool:
+    """True when two country names are the same country (aliases included: Myanmar = Burma)."""
+    return bool(set(country_names(a)) & set(country_names(b)))
 
 
 def verdict_for(names: list[str], region: str = "") -> Verdict:
@@ -326,7 +368,7 @@ def verdict_for(names: list[str], region: str = "") -> Verdict:
         feed = advisories()
     except Exception as e:
         log.warning("Safety: advisory feed unavailable (%s); failing CLOSED, skipping %r", redact(e), names[0])
-        return Verdict(True, "travel advisory could not be verified (feed unavailable)", names[0])
+        return Verdict(True, "travel advisory could not be verified (feed unavailable)", names[0], transient=True)
     level, matched = _match_level(names, feed)
     if level is None:
         log.warning("Safety: no official advisory found for %r; failing CLOSED, skipping", names[0])

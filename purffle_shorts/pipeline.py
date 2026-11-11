@@ -449,6 +449,39 @@ class Studio:
                 log.warning("Voice engine '%s' failed: %s", eng, e)
         raise RuntimeError(f"All voice engines failed: {last}")
 
+    @staticmethod
+    def _listed(pick: Topic) -> bool:
+        return pick.source == "list" and bool(pick.country)
+
+    def _advisory(self, pick: Topic, *, place: str = "", country: str = "") -> safety.Verdict:
+        """The travel-advisory verdict for this topic - before the script (no ``place``) or for the place the
+        video resolved to. Fails CLOSED.
+
+        A listed place is decided from the list's own country and region, with no LLM (the same rule the Scout
+        vetted it with, against today's feed). If the video resolved to a different country than the list
+        says, it is skipped: the place is not the one that was vetted. Any other topic is located by the LLM;
+        at the produce stage the resolved place must be in a known country."""
+        if self._listed(pick):
+            if country and not safety.same_country(country, pick.country):
+                return safety.Verdict(True, f"the video resolved to {place}, {country}, but the list vetted "
+                                            f"{pick.place or pick.subject} in {pick.country}")
+            v = safety.verdict_for(safety.country_names(pick.country), pick.region)
+            if not v.unsafe:
+                log.info("Safety: listed place in %s%s - %s", pick.country,
+                         f" ({pick.region})" if pick.region else "", f"Level {v.level}, ok" if v.level else "ok")
+            return v
+        if place:
+            return safety.check(", ".join(x for x in (place, country) if x), self.llm, require_place=True)
+        return safety.check(pick.subject, self.llm)
+
+    def _release_if_transient(self, pick: Topic, e: BaseException) -> None:
+        """A listed place skipped only because a check could not run (LLM or advisory feed down) is not used
+        up: its claim is released so a later run takes it again."""
+        if getattr(e, "transient", False) and pick.source == "list" and pick.key:
+            self.history.release_topic(pick.key)
+            log.info("Topic list: %s released - the check could not run; a later run will try it again",
+                     pick.place or pick.subject)
+
     def _claim_check(self, script: Script, pick: Topic, *, kinds: tuple[str, ...] | None = None,
                      title_len: int = 60, known: dict | None = None) -> Script:
         """factcheck.verify_claims against the topic's article, fail CLOSED for the autopilot: if the checker
@@ -535,10 +568,10 @@ class Studio:
             hit = safety.sensitive_region(pick.subject)   # fail fast before writing the script
             if hit:
                 raise SkipTopic(f"sensitive region ({hit}) — skipped by policy")
-            if self.llm is not None and not s.offline and s.safety_filter:
-                verdict = safety.check(pick.subject, self.llm)
+            if s.safety_filter and not s.offline and (self.llm is not None or self._listed(pick)):
+                verdict = self._advisory(pick)
                 if verdict.unsafe:
-                    raise safety.UnsafeTopic(verdict.reason)
+                    raise safety.unsafe_topic(verdict)
             self._step("script", pick.subject)
             insights = analytics.insights(self.history) if s.learn_from_stats else ""
             style = style or pick.style or None
@@ -611,9 +644,10 @@ class Studio:
                 why = recent_violence_reason(script)       # the channel never tells recent tragedies
                 if why:
                     raise SkipTopic(f"topic centred on {why}")
-        except BaseException:
+        except BaseException as e:
             if pick.idea_id:
                 self.history.release_idea(pick.idea_id)
+            self._release_if_transient(pick, e)
             raise
         if standalone:
             self._step("done", script.title)
@@ -649,7 +683,7 @@ class Studio:
                     if s.safety_filter:
                         verdict = safety.check(script.topic or script.title, self.llm)
                         if verdict.unsafe:
-                            raise safety.UnsafeTopic(verdict.reason)
+                            raise safety.unsafe_topic(verdict)
                     if s.fact_check:
                         script = factcheck.scrub(self.llm, script, s)
             else:
@@ -665,6 +699,8 @@ class Studio:
             log.info("Stopped: the job was cancelled")
             raise
         except safety.UnsafeTopic as e:
+            if pick is not None:                       # produce stage (a draft-stage skip is released in draft)
+                self._release_if_transient(pick, e)
             log.warning("Skipped (travel advisory): %s", redact(e))
             return Result(False, folder=state.get("folder"), status="skipped", error=str(e),
                           seconds=time.time() - t0)
@@ -717,9 +753,9 @@ class Studio:
                     raise SkipTopic("could not identify the place for place-accurate visuals")
                 log.info("Place: %s", ", ".join(x for x in (place, country) if x))
                 if s.safety_filter:
-                    v = safety.check(", ".join(x for x in (place, country) if x), self.llm)
+                    v = self._advisory(pick, place=place, country=country)
                     if v.unsafe:
-                        raise safety.UnsafeTopic(v.reason)
+                        raise safety.unsafe_topic(v)
                 # Coordinates: a listed place's own article; otherwise the best-matching article for the place.
                 coords = ((pick.lat, pick.lon) if pick.lat is not None and pick.lon is not None else
                           topics.place_coordinates(", ".join(x for x in (place, country) if x) or place,
