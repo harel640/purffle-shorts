@@ -32,6 +32,17 @@ GROQ_RATE_LIMIT_RETRIES = 3
 # max_tokens ("max completion tokens reached before generating a valid document"). ``effort="low"`` asks for
 # short reasoning; it is used for checking tasks, and for the one retry after a 413 when little room is left.
 GROQ_TPM_LIMIT = int(os.getenv("GROQ_TPM_LIMIT", "8000"))
+# Hidden reasoning counts against max_tokens: a 60-token JSON answer took 110-355 reasoning tokens first, so a
+# small max_tokens (250 for the safety location, 400 for place resolve, 600 for the place's look) ended in
+# HTTP 400 "Failed to validate JSON" with nothing generated. Such models always get at least this much room.
+MIN_REASONING_REPLY_TOKENS = 1500
+# A reply cut off by max_tokens: "max completion tokens reached", or JSON validation failing on an empty
+# generation. Retried once with more room.
+_TRUNCATED_RE = re.compile(r"max completion tokens reached|failed_generation\W+\"\"", re.I)
+
+
+def _is_truncated(error: Exception) -> bool:
+    return bool(_TRUNCATED_RE.search(str(error)))
 
 
 def _fitting_reply_tokens(system: str, user: str, limit: int = 0) -> int:
@@ -271,6 +282,10 @@ class OpenAICompatible(Provider):
     def takes_effort(self) -> bool:
         return self.name == "groq" and "gpt-oss" in self.model
 
+    def hides_reasoning(self) -> bool:
+        """An open-weight reasoning model (gpt-oss) whose hidden reasoning tokens are charged to max_tokens."""
+        return "gpt-oss" in self.model
+
     def complete(self, system, user, *, schema=None, temperature=0.9, max_tokens=4000, effort=None) -> str:
         payload: dict[str, Any] = {
             "model": self.model,
@@ -282,7 +297,8 @@ class OpenAICompatible(Provider):
             payload["max_completion_tokens"] = max(max_tokens, 8000)  # room for hidden reasoning tokens
         else:
             payload["temperature"] = temperature
-            payload["max_tokens"] = max_tokens
+            payload["max_tokens"] = (max(max_tokens, MIN_REASONING_REPLY_TOKENS) if self.hides_reasoning()
+                                     else max_tokens)
         if schema and self._schema_mode:
             # Strict structured output: the reply is guaranteed to have exactly the keys and types asked for.
             payload["response_format"] = {"type": "json_schema",
@@ -481,6 +497,7 @@ class LLM:
         ``effort`` ("low") asks a reasoning model for short reasoning, where the provider supports it."""
         errors: list[str] = []
         shrunk: set[int] = set()           # providers already retried once after "request too large"
+        grown: set[int] = set()            # providers already retried once after a reply cut off by max_tokens
         temp = self.settings.llm_temperature if temperature is None else temperature
         # Providers whose circuit is open go last: they are tried only if every other provider fails.
         providers = ([p for p in self.providers if not self.circuit_open(p.name)]
@@ -496,6 +513,8 @@ class LLM:
             # reasoning when that leaves it room (a script written with low effort came out mostly invented);
             # only a tight budget asks for short reasoning.
             fit = min(max_tokens, _fitting_reply_tokens(system, user)) if i in shrunk else max_tokens
+            if i in grown:                 # the reply was cut off: much more room, as much as is sure to fit
+                fit = max(fit, min(max(4 * fit, 4000), _fitting_reply_tokens(system, user)))
             small_effort = "low" if i in shrunk and fit < 3800 else effort
 
             def _call(p=p, fit=fit, small_effort=small_effort, takes_effort=takes_effort):
@@ -531,6 +550,11 @@ class LLM:
                     shrunk.add(i)
                     log.warning("Groq refused the request as too large; retrying once with a %d-token reply",
                                 min(max_tokens, _fitting_reply_tokens(system, user)))
+                    continue
+                # The reply ran out of max_tokens (hidden reasoning ate it): once more with more room.
+                if _is_truncated(e) and i not in grown and i not in shrunk:
+                    grown.add(i)
+                    log.warning("LLM %s ran out of reply tokens; retrying once with more room", p)
                     continue
                 # The Groq backup gets per-minute rate-limited on the free tier: that clears within a minute,
                 # so wait 60s and retry (up to 3 times) instead of skipping the video.

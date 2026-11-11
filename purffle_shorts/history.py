@@ -316,6 +316,11 @@ class History:
     def mark_topic(self, key: str) -> None:
         self._exec("INSERT OR IGNORE INTO topics_used (key, used_at) VALUES (?, ?)", (key.lower(), now_iso()))
 
+    def release_topic(self, key: str) -> None:
+        """Un-claim a topic (e.g. a listed place skipped only because a check could not run) so a later run
+        can take it again."""
+        self._exec("DELETE FROM topics_used WHERE key = ?", (key.lower(),))
+
     # -- small persistent state (e.g. the day YouTube last refused an upload) --
     def get_meta(self, key: str) -> str | None:
         rows = self._all("SELECT value FROM meta WHERE key = ?", (key,))
