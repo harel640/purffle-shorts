@@ -334,23 +334,27 @@ def test_kokoro_voices_each_sentence_and_times_the_words_by_sentence(monkeypatch
     from purffle_shorts import kokoro_local as K
     lengths = {"In 1900 Wang found a cave.": 1.0, "Behind the wall lay scrolls!": 2.0, "Why?": 0.5}
     said = []
+    sr = K.SAMPLE_RATE
 
-    def speak(sentence, voice, speed):
-        said.append((sentence, voice, speed))
-        return np.full(int(lengths[sentence] * K.SAMPLE_RATE), 0.1, dtype=np.float32)
-    monkeypatch.setattr(K, "speak", speak)
+    def speak_all(sentences, voice, speed, work):
+        said.append((list(sentences), voice, speed))
+        # as Kokoro returns them: ~0.4 s of silence before each sentence and ~0.6 s after it
+        return [np.concatenate([np.zeros(int(0.4 * sr)), np.full(int(lengths[s] * sr), 0.1),
+                                np.zeros(int(0.6 * sr))]).astype(np.float32) for s in sentences]
+    monkeypatch.setattr(K, "speak_all", speak_all)
     monkeypatch.setattr(K, "available", lambda voice="": True)
     monkeypatch.delenv("KOKORO_SPEED", raising=False)
     path, words, voice = tts._kokoro("In 1900 Wang found a cave. Behind the wall lay scrolls! Why?", tmp_path,
                                      Settings())
-    assert [s for s, _, _ in said] == list(lengths) and said[0][1:] == ("am_michael", tts.KOKORO_SPEED)
+    assert said == [(list(lengths), "am_michael", tts.KOKORO_SPEED)]
     assert voice == "kokoro am_michael"
     with wave.open(str(path)) as w:
         total = w.getnframes() / w.getframerate()
-    gap = tts.KOKORO_SENTENCE_GAP
-    assert abs(total - (3.5 + 2 * gap)) < 0.01
+    gap, pad = tts.KOKORO_SENTENCE_GAP, K.LEAD_KEEP + K.TAIL_KEEP      # the padding is trimmed to a breath
+    assert abs(total - (3.5 + 3 * pad + 2 * gap)) < 0.02
     starts = {w.text: w.start for w in words}
-    assert starts["In"] < 0.2 and abs(starts["Behind"] - (1.0 + gap)) < 0.2 and starts["Why?"] >= 3.0 + 2 * gap - 0.01
+    behind = 1.0 + pad + gap
+    assert starts["In"] < 0.2 and abs(starts["Behind"] - behind) < 0.2 and starts["Why?"] >= 3.0 + 2 * gap
     assert [w.start for w in words] == sorted(w.start for w in words)
 
 
