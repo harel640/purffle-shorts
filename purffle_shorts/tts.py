@@ -103,18 +103,6 @@ class VoiceUnavailable(RuntimeError):
     transient = True
 
 
-# Piper: a local voice that needs no network, the fallback when edge-tts is down. It runs as its own program
-# (the `piper` command of the piper-tts package, GPL-3.0 - never imported). The model path comes from
-# PIPER_VOICE (the Docker image ships en_US "norman", trained on public-domain LibriVox readings).
-PIPER_DEFAULT_VOICE = "/opt/piper-voices/en_US-norman-medium.onnx"
-PIPER_SENTENCE_GAP = 0.32   # seconds of silence between sentences (Piper speaks each one separately)
-PIPER_TIMEOUT = 180
-# Piper's own pace is ~3.2 words/s - quick for documentary narration and well above the ~2.4 w/s the 45-60 s
-# story scripts are written for. 1.2 = 20% longer phonemes (~2.6 w/s with the sentence pauses).
-# PIPER_LENGTH_SCALE overrides it; TTS_RATE is edge-tts's and does not apply.
-PIPER_LENGTH_SCALE = 1.2
-
-
 # ------------------------------------------------------------------------------------------ engines
 def _edge(text: str, out: Path, settings: Settings) -> tuple[Path, list[Word], str]:
     try:
@@ -152,59 +140,59 @@ def _edge(text: str, out: Path, settings: Settings) -> tuple[Path, list[Word], s
     return path, words, voice
 
 
-def _piper_sentences(text: str) -> list[str]:
+# Kokoro-82M, local: the voice used when edge-tts is down (kokoro_local: onnxruntime on the CPU, no network).
+# At its own pace (1.0) am_michael speaks ~2.4 words/s with the sentence pauses - the pace the 45-60 s story
+# scripts are written for (0.9 measured 2.1 w/s: most stories would need a length rewrite). KOKORO_SPEED
+# overrides it; TTS_RATE is edge-tts's and does not apply.
+KOKORO_SPEED = 1.0
+KOKORO_SENTENCE_GAP = 0.3   # seconds of silence between sentences (each sentence is spoken separately)
+
+
+def _sentences(text: str) -> list[str]:
     return [x for x in re.split(r"(?<=[.!?])\s+", " ".join((text or "").split())) if x.strip()]
 
 
-def _piper(text: str, out: Path, settings: Settings) -> tuple[Path, list[Word], str]:
-    """Voice ``text`` with Piper, one sentence at a time (one `piper` call; it writes a WAV per input line),
-    joined with a short pause. Each sentence's start is then exact, and the words inside it are timed in
-    proportion - so captions stay in step without a word aligner."""
-    if settings.language.split("-")[0] != "en":
-        raise PermanentError(f"the Piper voice is English only (language {settings.language})")
-    exe = shutil.which("piper")
-    model = Path(settings.tts_voice if settings.tts_voice.endswith(".onnx") else
-                 os.getenv("PIPER_VOICE") or PIPER_DEFAULT_VOICE)
-    if not exe or not model.exists():
-        raise PermanentError(f"Piper is not available (piper command: {exe or 'missing'}, voice: {model})")
-    sentences = _piper_sentences(text)
-    if not sentences:
-        raise PermanentError("nothing to say")
-    parts_dir = out / "piper"
-    shutil.rmtree(parts_dir, ignore_errors=True)
-    parts_dir.mkdir(parents=True)
-    cmd = [exe, "-m", str(model), "-d", str(parts_dir),
-           "--length-scale", f"{float(os.getenv('PIPER_LENGTH_SCALE') or PIPER_LENGTH_SCALE):.3f}"]
-    try:
-        subprocess.run(cmd, input="\n".join(sentences) + "\n", text=True, capture_output=True, check=True,
-                       timeout=PIPER_TIMEOUT)
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(f"piper failed: {(e.stderr or '').strip()[-300:]}") from e
-    wavs = sorted(parts_dir.glob("*.wav"))      # named by a timestamp: sorted = spoken order
-    if len(wavs) != len(sentences):
-        raise RuntimeError(f"piper wrote {len(wavs)} file(s) for {len(sentences)} sentence(s)")
+def _join_sentences(parts: list, sentences: list[str], rate: int, out: Path, language: str,
+                    gap: float) -> tuple[Path, list[Word]]:
+    """Write float sample arrays (one per sentence) as one 16-bit WAV with ``gap`` seconds between them.
+    Each sentence's start is exact; the words inside it are timed in proportion."""
+    import numpy as np
     path = out / "voice.wav"
     words: list[Word] = []
     t = 0.0
-    with wave.open(str(path), "wb") as dst:
-        for i, (wav, sentence) in enumerate(zip(wavs, sentences)):
-            with wave.open(str(wav), "rb") as src:
-                if i == 0:
-                    dst.setnchannels(src.getnchannels())
-                    dst.setsampwidth(src.getsampwidth())
-                    dst.setframerate(src.getframerate())
-                rate, frames = src.getframerate(), src.readframes(src.getnframes())
-            dur = len(frames) / (rate * src.getsampwidth() * src.getnchannels())
-            words += [Word(w.text, round(w.start + t, 3), round(w.end + t, 3))
-                      for w in estimate_timings(tokenize(sentence, settings.language), dur, lead=0.05, tail=0.1)]
-            dst.writeframes(frames)
-            t += dur
-            if i + 1 < len(wavs):
-                gap = int(PIPER_SENTENCE_GAP * rate)
-                dst.writeframes(b"\x00" * gap * src.getsampwidth() * src.getnchannels())
-                t += gap / rate
-    shutil.rmtree(parts_dir, ignore_errors=True)
-    return path, words, model.stem
+    silence = np.zeros(int(gap * rate), dtype=np.float32)
+    chunks = []
+    for i, (audio, sentence) in enumerate(zip(parts, sentences)):
+        dur = len(audio) / rate
+        words += [Word(w.text, round(w.start + t, 3), round(w.end + t, 3))
+                  for w in estimate_timings(tokenize(sentence, language), dur, lead=0.05, tail=0.1)]
+        chunks.append(audio)
+        t += dur
+        if i + 1 < len(parts):
+            chunks.append(silence)
+            t += gap
+    pcm = (np.clip(np.concatenate(chunks), -1, 1) * 32767).astype("<i2")
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(pcm.tobytes())
+    return path, words
+
+
+def _kokoro_local(text: str, out: Path, settings: Settings) -> tuple[Path, list[Word], str]:
+    from . import kokoro_local
+    if settings.language.split("-")[0] != "en":
+        raise PermanentError(f"the local Kokoro voice is English only (language {settings.language})")
+    voice = kokoro_local.voice_name(settings.tts_voice if "_" in (settings.tts_voice or "") else "")
+    sentences = _sentences(text)
+    if not sentences:
+        raise PermanentError("nothing to say")
+    speed = float(os.getenv("KOKORO_SPEED") or KOKORO_SPEED)
+    parts = [kokoro_local.speak(x, voice, speed) for x in sentences]
+    path, words = _join_sentences(parts, sentences, kokoro_local.SAMPLE_RATE, out, settings.language,
+                                  KOKORO_SENTENCE_GAP)
+    return path, words, f"kokoro {voice}"
 
 
 def _openai(text: str, out: Path, settings: Settings) -> tuple[Path, list[Word], str]:
@@ -270,11 +258,17 @@ _model_cache: dict[str, object] = {}
 
 
 def _kokoro(text: str, out: Path, settings: Settings) -> tuple[Path, list[Word], str]:
+    """Kokoro-82M: the local ONNX model when it is installed (the Docker image: kokoro_local), else the
+    `kokoro` Python package (an optional extra that brings PyTorch)."""
+    from . import kokoro_local
+    if kokoro_local.available(settings.tts_voice if "_" in (settings.tts_voice or "") else ""):
+        return _kokoro_local(text, out, settings)
     try:
         import numpy as np
         from kokoro import KPipeline
     except ImportError as e:
-        raise PermanentError("TTS_ENGINE=kokoro needs:  pip install kokoro soundfile") from e
+        raise PermanentError("TTS_ENGINE=kokoro needs the Kokoro model in KOKORO_DIR (the Docker image has it) "
+                             "or:  pip install kokoro soundfile") from e
     lang_code, default_voice = KOKORO_LANG.get(settings.language, KOKORO_LANG["en"])
     voice = _pick_voice(settings, default_voice)
     with _model_lock:
@@ -345,7 +339,7 @@ def _silent(text: str, out: Path, settings: Settings) -> tuple[Path, list[Word],
 
 
 _ENGINE_FUNCS = {"edge": _edge, "openai": _openai, "elevenlabs": _elevenlabs, "kokoro": _kokoro,
-                 "coqui": _coqui, "piper": _piper, "system": _system, "silent": _silent}
+                 "coqui": _coqui, "system": _system, "silent": _silent}
 NETWORK_ENGINES = {"edge", "openai", "elevenlabs"}       # may fail for a while and then work again
 
 
@@ -437,7 +431,7 @@ def _align(audio: Path, settings: Settings, text: str = "") -> tuple[list[Word],
 
 
 # ------------------------------------------------------------------------------------------ voice cache
-CACHED_ENGINES = {"edge", "openai", "elevenlabs", "kokoro", "coqui", "piper"}
+CACHED_ENGINES = {"edge", "openai", "elevenlabs", "kokoro", "coqui"}
 CACHE_LIMIT_MB = 400
 
 
@@ -513,8 +507,8 @@ def synthesize(text: str, out_dir: Path, settings: Settings) -> Speech:
         raise RuntimeError(f"{engine} produced unreadable audio: {audio}")
     tokens = tokenize(text, settings.language)
     if native:
-        # Piper's words are timed per sentence (exact sentence starts, proportional inside)
-        words, timing = transfer_timings(tokens, native, dur), "sentence" if engine == "piper" else "native"
+        # the local Kokoro voice is timed per sentence (exact sentence starts, proportional inside)
+        words, timing = transfer_timings(tokens, native, dur), "sentence" if engine == "kokoro" else "native"
     elif engine == "silent":
         words, timing = estimate_timings(tokens, dur), "estimated"
     else:

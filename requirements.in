@@ -15,9 +15,10 @@ cryptography<49; sys_platform == "darwin" and platform_machine == "x86_64"   # n
 # Claude (Anthropic) provider — other LLMs need no extra package
 anthropic>=1.0
 
-# Local fallback voice when edge-tts is down: Piper, run as a separate program (the `piper` command; its
-# package is GPL-3.0, so it is never imported). The voice model is downloaded and checksum-pinned in the Dockerfile.
-piper-tts>=1.8,<2; sys_platform == "linux"
+# Local fallback voice when edge-tts is down: Kokoro-82M (Apache-2.0) run with onnxruntime on the CPU
+# (kokoro_local.py; no PyTorch). The model and voice are downloaded and checksum-pinned in the Dockerfile.
+onnxruntime>=1.20,<2; sys_platform == "linux"
+numpy>=2,<3; sys_platform == "linux"
 
 # Optional extras (install only what you use):
 #   faster-whisper   precise word timing for OpenAI/Kokoro/Coqui/system voices, and the `clip` command

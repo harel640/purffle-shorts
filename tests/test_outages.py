@@ -1,4 +1,4 @@
-"""P6: outages do not burn list places; the voice-over is retried, then voiced locally (Piper).
+"""P6: outages do not burn list places; the voice-over is retried, then voiced locally (Kokoro).
 
 A run that ends because something it needed was down (every LLM, every voice, vision, the fact checker, the
 network) gives its listed place back; a run that ends because the place broke a rule uses it up. A claim left
@@ -9,7 +9,6 @@ import logging
 import sqlite3
 import wave
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -252,20 +251,20 @@ def test_tts_fails_twice_then_succeeds_and_the_video_continues(tmp_path, monkeyp
     assert any(r.getMessage().startswith("Voice used: edge") for r in caplog.records)
 
 
-def test_edge_fails_three_times_and_piper_voices_it(tmp_path, monkeypatch, caplog):
-    st, script, calls = _voice_studio(tmp_path, monkeypatch, {"edge": ["fail"] * 3, "piper": ["ok"]})
+def test_edge_fails_three_times_and_kokoro_voices_it(tmp_path, monkeypatch, caplog):
+    st, script, calls = _voice_studio(tmp_path, monkeypatch, {"edge": ["fail"] * 3, "kokoro": ["ok"]})
     caplog.set_level(logging.INFO, logger="purffle")
     sp = st._speak(script, tmp_path, st.s)
-    assert sp.engine == "piper" and calls == ["edge", "edge", "edge", "piper"]
+    assert sp.engine == "kokoro" and calls == ["edge", "edge", "edge", "kokoro"]
     used = [r.getMessage() for r in caplog.records if r.getMessage().startswith("Voice used:")]
-    assert used == ["Voice used: piper (v) - fallback, edge failed"]
+    assert used == ["Voice used: kokoro (v) - fallback, edge failed"]
 
 
 def test_every_voice_fails_and_the_run_ends_as_an_outage(tmp_path, monkeypatch):
-    st, script, calls = _voice_studio(tmp_path, monkeypatch, {"edge": ["fail"] * 3, "piper": ["missing"]})
+    st, script, calls = _voice_studio(tmp_path, monkeypatch, {"edge": ["fail"] * 3, "kokoro": ["missing"]})
     with pytest.raises(tts.VoiceUnavailable) as e:
         st._speak(script, tmp_path, st.s)
-    assert calls == ["edge", "edge", "edge", "piper"] and P.failure_kind(e.value) == "transient"
+    assert calls == ["edge", "edge", "edge", "kokoro"] and P.failure_kind(e.value) == "transient"
 
 
 def test_tts_fails_three_times_the_claim_is_released_and_no_second_place_is_tried(tmp_path, monkeypatch):
@@ -289,58 +288,83 @@ def test_tts_fails_three_times_the_claim_is_released_and_no_second_place_is_trie
     assert not st.history.topic_used(_key("Yungang Grottoes"))  # never reached
 
 
-def test_piper_forced_is_used_first(tmp_path, monkeypatch):
-    st, script, calls = _voice_studio(tmp_path, monkeypatch, {"piper": ["ok"]}, tts_engine="piper")
-    assert st._speak(script, tmp_path, st.s).engine == "piper" and calls == ["piper"]
+def test_kokoro_forced_is_used_first(tmp_path, monkeypatch):
+    st, script, calls = _voice_studio(tmp_path, monkeypatch, {"kokoro": ["ok"]}, tts_engine="kokoro")
+    assert st._speak(script, tmp_path, st.s).engine == "kokoro" and calls == ["kokoro"]
 
 
 def test_tts_fallback_setting(monkeypatch):
     monkeypatch.delenv("TTS_FALLBACK", raising=False)
-    assert Settings.from_env().tts_fallback == ["piper"]
+    assert Settings.from_env().tts_fallback == ["kokoro"]
     monkeypatch.setenv("TTS_FALLBACK", "none")
     assert Settings.from_env().tts_fallback == []
 
 
-# ------------------------------------------------------------------ the Piper engine (a fake `piper` program)
-def _fake_piper(monkeypatch, tmp_path, seconds=(1.0, 2.0, 0.5), rate=22050):
-    model = tmp_path / "voice.onnx"
-    model.write_bytes(b"x")
-    monkeypatch.setenv("PIPER_VOICE", str(model))
-    monkeypatch.setattr(tts.shutil, "which", lambda name: "/usr/local/bin/piper" if name == "piper" else None)
-    seen = {}
-
-    def run(cmd, input, **k):
-        seen["cmd"], seen["lines"] = cmd, input.splitlines()
-        out = Path(cmd[cmd.index("-d") + 1])
-        for i, (_line, sec) in enumerate(zip(seen["lines"], seconds)):
-            with wave.open(str(out / f"{1000 + i}.wav"), "wb") as w:
-                w.setnchannels(1)
-                w.setsampwidth(2)
-                w.setframerate(rate)
-                w.writeframes(b"\x01\x00" * int(sec * rate))
-        return SimpleNamespace(returncode=0)
-    monkeypatch.setattr(tts.subprocess, "run", run)
-    return seen
+# ------------------------------------------------------------------ the local Kokoro voice (kokoro_local)
+def test_espeak_ipa_is_mapped_to_kokoro_phonemes():
+    from purffle_shorts import kokoro_local as K
+    # espeak-ng 1.52 `--ipa --tie=^ -v en-us`, "Why? joy, eight, smoke, chair"
+    assert K.espeak_to_kokoro("wˈa^ɪ") == "wˈI"
+    assert K.espeak_to_kokoro("d^ʒˈɔ^ɪ") == "ʤˈY"
+    assert K.espeak_to_kokoro("ˈe^ɪt") == "ˈAt"
+    assert K.espeak_to_kokoro("smˈo^ʊk") == "smˈOk"
+    assert K.espeak_to_kokoro("t^ʃˈɛɹ") == "ʧˈɛɹ"
+    assert K.espeak_to_kokoro("ɐ sˈiːld") == "ə sˈild"          # length marks dropped, ɐ -> ə
 
 
-def test_piper_voices_each_sentence_and_times_the_words_by_sentence(monkeypatch, tmp_path):
-    seen = _fake_piper(monkeypatch, tmp_path)
-    path, words, voice = tts._piper("In 1900 Wang found a cave. Behind the wall lay scrolls! Why?", tmp_path,
-                                    Settings())
-    assert seen["lines"] == ["In 1900 Wang found a cave.", "Behind the wall lay scrolls!", "Why?"]
-    assert voice == "voice" and path.name == "voice.wav"
+def test_punctuation_is_kept_for_the_pauses():
+    from purffle_shorts import kokoro_local as K
+    fake = {"In 1900 he followed smoke": "ɪn nˈa^ɪntiːn", "to a wall": "tʊ ɐ wˈɔːl", "Why": "wˈa^ɪ"}
+    ps = K.phonemize("In 1900 he followed smoke, to a wall. Why?", ipa=lambda x: fake[x])
+    assert ps == "ɪn nˈIntin, tʊ ə wˈɔl. wˈI?"
+    vocab = {c: i for i, c in enumerate(";:,.!?—… ɪnˈItəwɔl")}
+    assert all(isinstance(i, int) for i in K.tokens(ps, vocab)) and len(K.tokens("x" * 600, {"x": 1})) == 510
+
+
+def test_only_known_voice_names_are_used(monkeypatch):
+    from purffle_shorts import kokoro_local as K
+    monkeypatch.delenv("KOKORO_VOICE", raising=False)
+    assert K.voice_name() == "am_michael" and K.voice_name("bm_george") == "bm_george"
+    assert K.voice_name("../../etc/passwd") == "am_michael"
+
+
+def test_kokoro_voices_each_sentence_and_times_the_words_by_sentence(monkeypatch, tmp_path):
+    import numpy as np
+
+    from purffle_shorts import kokoro_local as K
+    lengths = {"In 1900 Wang found a cave.": 1.0, "Behind the wall lay scrolls!": 2.0, "Why?": 0.5}
+    said = []
+
+    def speak(sentence, voice, speed):
+        said.append((sentence, voice, speed))
+        return np.full(int(lengths[sentence] * K.SAMPLE_RATE), 0.1, dtype=np.float32)
+    monkeypatch.setattr(K, "speak", speak)
+    monkeypatch.setattr(K, "available", lambda voice="": True)
+    monkeypatch.delenv("KOKORO_SPEED", raising=False)
+    path, words, voice = tts._kokoro("In 1900 Wang found a cave. Behind the wall lay scrolls! Why?", tmp_path,
+                                     Settings())
+    assert [s for s, _, _ in said] == list(lengths) and said[0][1:] == ("am_michael", tts.KOKORO_SPEED)
+    assert voice == "kokoro am_michael"
     with wave.open(str(path)) as w:
         total = w.getnframes() / w.getframerate()
-    gap = tts.PIPER_SENTENCE_GAP
-    assert abs(total - (1.0 + 2.0 + 0.5 + 2 * gap)) < 0.01
+    gap = tts.KOKORO_SENTENCE_GAP
+    assert abs(total - (3.5 + 2 * gap)) < 0.01
     starts = {w.text: w.start for w in words}
     assert starts["In"] < 0.2 and abs(starts["Behind"] - (1.0 + gap)) < 0.2 and starts["Why?"] >= 3.0 + 2 * gap - 0.01
     assert [w.start for w in words] == sorted(w.start for w in words)
 
 
-def test_piper_is_english_only_and_must_be_installed(monkeypatch, tmp_path):
+def test_the_local_kokoro_is_english_only(monkeypatch, tmp_path):
+    from purffle_shorts import kokoro_local as K
+    monkeypatch.setattr(K, "available", lambda voice="": True)
     with pytest.raises(PermanentError, match="English only"):
-        tts._piper("Hola.", tmp_path, Settings(language="es"))
-    monkeypatch.setattr(tts.shutil, "which", lambda name: None)
-    with pytest.raises(PermanentError, match="not available"):
-        tts._piper("Hello.", tmp_path, Settings())
+        tts._kokoro("Hola.", tmp_path, Settings(language="es"))
+
+
+def test_without_the_model_kokoro_needs_its_package(monkeypatch, tmp_path):
+    from purffle_shorts import kokoro_local as K
+    monkeypatch.setattr(K, "available", lambda voice="": False)
+    import sys
+    monkeypatch.setitem(sys.modules, "kokoro", None)          # the optional package is not installed
+    with pytest.raises(PermanentError, match="KOKORO_DIR"):
+        tts._kokoro("Hello.", tmp_path, Settings())
