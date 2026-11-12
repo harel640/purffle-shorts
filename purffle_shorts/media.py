@@ -266,6 +266,9 @@ _SKIP_IMAGE_RE = re.compile(
     r"(?<![a-z])(maps?|satellite|topographic|locator|diagram|schematic|floor ?plan|site ?plan|"
     r"sketch ?map|street ?map|road ?map|cadastral|"
     r"signs?|signboards?|signposts?|noticeboards?|notices?|warnings?|billboards?|boards?|plaques?|"
+    # graphics, not photos of a place (Vigan, Nov 12: "Seal of Vigan, Ilocos Sur (1991-2001)" was a scene)
+    r"seals?|logos?|logotypes?|emblems?|coats?[ -]of[ -]arms|insignias?|heraldry|heraldic|escutcheons?|"
+    r"(?<!prayer )flags?|banners?|badges?|heraldic crests?|wordmarks?|icons?|clip ?art|vector|"
     r"food|foods|dish|dishes|meals?|cuisine|restaurants?|cafes?|dining|buffets?|thali|curry|curries|"
     r"breakfast|lunch|dinner|snacks?|eating|eaten|feast|"
     r"butcher\w*|carcass\w*|slaughter\w*|abattoir|flayed|animal corpse|dead animal)(?![a-z])", re.I)
@@ -498,6 +501,8 @@ _HISTORICAL_PERIOD = ("period-accurate historical scene: only hand-made things o
 _ANACHRONISM_RE = re.compile(
     r"(?<![a-z])(maps?|cartograph\w*|atlas(?:es)?|flags?|banners?|pennants?|documents?|papers?|paperwork|"
     r"newspapers?|letters?|books?|scrolls?|manuscripts?|ledgers?|signs?|signboards?|signposts?|posters?|"
+    # Vigan, Nov 12: "...with Ilocos region shown on a parchment" was kept and drew a parchment map
+    r"parchments?|vellum|plans?|layouts?|decrees?|edicts?|charters?|deeds?|"
     r"plaques?|certificates?|charts?|diagrams?|blueprints?|globes?|compass(?:es)?|clocks?|wristwatch\w*|"
     r"spectacles|eyeglasses|cameras?|photographs?|photos?|phones?|smartphones?|cars?|trucks?|bus|buses|"
     r"trains?|railways?|planes?|aeroplanes?|airplanes?|aircraft|helicopters?|motorbikes?|motorcycles?|"

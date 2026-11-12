@@ -504,7 +504,7 @@ class Studio:
 
     # ------------------------------------------------------------------ voice with fallbacks
     def _speak(self, script: Script, work: Path, s: Settings) -> tts.Speech:
-        """The voice-over, from the first engine that works: TTS_ENGINE, then edge-tts, then TTS_FALLBACK (Piper,
+        """The voice-over, from the first engine that works: TTS_ENGINE, then edge-tts, then TTS_FALLBACK (Kokoro,
         local). A network engine gets VOICE_ATTEMPTS tries of VOICE_ATTEMPT_SECONDS each, VOICE_RETRY_WAIT apart
         (an edge-tts outage once cost two list places in one evening). If nothing works: VoiceUnavailable, a
         transient failure - the run ends and the place is given back, rather than moving on to burn the next."""
