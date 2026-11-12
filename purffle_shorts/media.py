@@ -1076,7 +1076,8 @@ class Visuals:
                 for it in self._search(source, q):
                     if it.kind != "video":
                         continue
-                    have = set(re.findall(r"[a-z]+", f"{it.text} {it.query}".lower()))
+                    # the clip's OWN metadata - not it.query, our search, which always names the place
+                    have = set(re.findall(r"[a-z]+", (it.text or "").lower()))
                     if not (tokens & have):
                         continue
                     with self.lock:

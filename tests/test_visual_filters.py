@@ -71,7 +71,10 @@ def test_the_vision_subject_names_only_what_a_photo_can_show(query, subject):
 
 
 def test_a_stock_video_must_name_the_place_not_just_caves_or_china(monkeypatch, tmp_path):
-    clips = {"ice caves china aurora": M.MediaItem("pixabay", "1", "video", text="aurora ice caves china"),
+    # Nov 12: a fantasy-forest clip found by searching "Mogao Caves heritage" (its query names the place, its
+    # own tags do not) closed the video.
+    clips = {"ice caves china aurora": M.MediaItem("pixabay", "1", "video", text="aurora ice caves china fantasy",
+                                                   query="Mogao Caves heritage Mogao Caves"),
              "mogao": M.MediaItem("pixabay", "2", "video", text="mogao grottoes dunhuang desert")}
     v = M.Visuals.__new__(M.Visuals)
     v.sources, v.used = ["pixabay"], set()
