@@ -36,6 +36,7 @@ def test_the_vision_check_asks_for_a_photograph_of_the_place():
     q = LLM._vision_question(None, "Vigan, Philippines")          # needs no configured provider
     assert "real photograph of a place" in q and "seal" in q and "logo" in q and "coat of arms" in q
     assert "flag" in q and q.count("Vigan, Philippines") == 2 and q.endswith('Answer only "yes" or "no".')
+    assert "mural" in q and "statue" in q          # photos of murals and statues (Mogao) still count
 
 
 @pytest.mark.parametrize("prompt", [
