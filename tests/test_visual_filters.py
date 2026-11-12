@@ -53,3 +53,32 @@ def test_ai_prompts_lose_every_clause_about_scrolls_parchment_charts_and_plans(p
 def test_period_scenes_without_documents_are_kept():
     p = "Augustinian friars in simple robes guiding workers building stone houses in Vigan."
     assert M.period_prompt(p) == p.rstrip(".")
+
+
+def _pool(*titles):
+    return [M.MediaItem("wikimedia", str(i), "image", text=t) for i, t in enumerate(titles)]
+
+
+@pytest.mark.parametrize("query, subject", [
+    ("Aurel Stein Mogao Caves", "Mogao Caves"),                 # a person no photo of the caves shows
+    ("Stein donation Wang restoration", "Mogao Caves"),         # nothing visible named: the place itself
+    ("Mogao Caves Library Cave", "Mogao Caves Library Cave"),
+    ("Mogao Caves side corridor", "Mogao Caves side corridor"),
+])
+def test_the_vision_subject_names_only_what_a_photo_can_show(query, subject):
+    pool = _pool("File:Mogao Caves, Dunhuang 2015.jpg", "File:Library Cave entrance, Mogao Caves.jpg")
+    assert M.visible_subject(query, "Mogao Caves", pool) == subject
+
+
+def test_a_stock_video_must_name_the_place_not_just_caves_or_china(monkeypatch, tmp_path):
+    clips = {"ice caves china aurora": M.MediaItem("pixabay", "1", "video", text="aurora ice caves china"),
+             "mogao": M.MediaItem("pixabay", "2", "video", text="mogao grottoes dunhuang desert")}
+    v = M.Visuals.__new__(M.Visuals)
+    v.sources, v.used = ["pixabay"], set()
+    import threading
+    v.lock = threading.Lock()
+    monkeypatch.setattr(v, "_search", lambda source, q: [clips["ice caves china aurora"]], raising=False)
+    monkeypatch.setattr(v, "_fetch", lambda it, d, i: it, raising=False)
+    assert v._place_stock_video("Aurel Stein", "Mogao Caves", "China", tmp_path, 0) is None
+    monkeypatch.setattr(v, "_search", lambda source, q: [clips["mogao"]], raising=False)
+    assert v._place_stock_video("Aurel Stein", "Mogao Caves", "China", tmp_path, 0).id == "2"

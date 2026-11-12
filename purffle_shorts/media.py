@@ -743,6 +743,19 @@ def _stem(word: str) -> str:
     return w
 
 
+def visible_subject(query: str, place: str, pool: list[MediaItem]) -> str:
+    """What a photo for a middle scene must show, for the vision check: the scene's query without the names
+    no photo of the place carries - people ("Aurel Stein Mogao Caves" -> "Mogao Caves"; the strict photo
+    question rejected every cave photo for it, Nov 12). A capitalised word stays only when some pool photo's
+    title/categories contain it; with no such landmark name left, the photo must simply show the place."""
+    vocab = {w.lower() for it in pool for w in re.findall(r"[A-Za-z]+", f"{it.text} {it.query}")}
+    kept = [w for w in (query or "").split()
+            if not w[:1].isupper() or re.sub(r"[^a-z]", "", w.lower()) in vocab]
+    if not any(w[:1].isupper() for w in kept):
+        return place or (query or "")
+    return " ".join(kept)
+
+
 def _terms(text: str) -> set[str]:
     return {_stem(w) for w in re.findall(r"[A-Za-z]+", text.lower()) if w not in STOP_WORDS and len(w) > 1}
 
@@ -1050,8 +1063,11 @@ class Visuals:
             return best
 
     def _place_stock_video(self, query: str, place: str, country: str, dest_dir: Path, idx: int) -> MediaItem | None:
-        """Stock VIDEO fallback — allowed only when the clip's own metadata names the place (or country)."""
-        tokens = {t for t in re.findall(r"[a-z]+", f"{place} {country}".lower()) if len(t) > 2}
+        """Stock VIDEO fallback — allowed only when the clip's own metadata names the place by its distinctive
+        name ("mogao"): its country or a generic word ("caves", "china") let an unrelated clip in (Nov 12)."""
+        from .history import _PLACE_GENERIC
+        tokens = {t for t in re.findall(r"[a-z]+", place.lower())
+                  if len(t) > 2 and t not in _PLACE_GENERIC} - set(re.findall(r"[a-z]+", country.lower()))
         if not tokens:
             return None
         for source in [x for x in self.sources if x in ("pexels", "pixabay")]:
@@ -1312,7 +1328,8 @@ class Visuals:
         statues = 0                                            # scenes already showing a statue (max MAX_STATUE_SCENES)
         for i, (q, prompt, historical) in enumerate(jobs):
             is_landmark = i == 0 or i == last                  # opener & closer must show the main landmark
-            subject = exterior_subject if i == 0 else (landmark_subject if is_landmark else (q or place))
+            subject = exterior_subject if i == 0 else (landmark_subject if is_landmark else
+                                                       visible_subject(q, place, pool))
             no_statues = statues >= MAX_STATUE_SCENES
             # A scene set before the place existed is drawn period-neutral (landscape, caves, simple shelters),
             # never in the place's own architecture.
