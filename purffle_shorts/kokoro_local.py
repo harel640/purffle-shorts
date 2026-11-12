@@ -125,6 +125,45 @@ def tokens(ps: str, vocab: dict) -> list[int]:
     return [vocab[c] for c in ps if c in vocab][:MAX_TOKENS]
 
 
+LEAD_KEEP = 0.05    # seconds kept before the first sound of a sentence (Kokoro pads ~0.4 s)
+TAIL_KEEP = 0.12    # ... and after the last (Kokoro pads ~0.6 s); the caller adds its own pause between them
+SPEAK_TIMEOUT = 600
+
+
+def trim(audio, threshold: float = 0.01):
+    """``audio`` without the silence Kokoro puts around every sentence (~1 s per sentence, 12 s in a story)."""
+    import numpy as np
+    loud = np.flatnonzero(np.abs(audio) > threshold)
+    if not len(loud):
+        return audio
+    a = max(0, int(loud[0] - LEAD_KEEP * SAMPLE_RATE))
+    b = min(len(audio), int(loud[-1] + TAIL_KEEP * SAMPLE_RATE))
+    return audio[a:b]
+
+
+def speak_all(sentences: list[str], voice: str, speed: float, work: Path) -> list:
+    """Every sentence, voiced in a CHILD process (``python -m purffle_shorts.kokoro_local``): the model holds
+    ~650 MB while loaded, and a render right after it once ran out of memory. The child's memory is returned
+    in full when it exits."""
+    import sys
+
+    import numpy as np
+    if not available(voice_name(voice)):
+        raise KokoroUnavailable(f"Kokoro model or voice {voice_name(voice)!r} not found in {model_dir()}, "
+                                f"or espeak-ng missing")
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir(parents=True)
+    req = {"sentences": sentences, "voice": voice, "speed": speed, "out": str(work)}
+    try:
+        subprocess.run([sys.executable, "-m", "purffle_shorts.kokoro_local"], input=json.dumps(req), text=True,
+                       capture_output=True, check=True, timeout=SPEAK_TIMEOUT)
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"kokoro failed: {(e.stderr or '').strip()[-400:]}") from e
+    parts = [np.load(work / f"{i:03d}.npy") for i in range(len(sentences))]
+    shutil.rmtree(work, ignore_errors=True)
+    return parts
+
+
 def speak(sentence: str, voice: str = "", speed: float = 1.0):
     """float32 mono samples at SAMPLE_RATE for one sentence."""
     import numpy as np
@@ -141,3 +180,18 @@ def speak(sentence: str, voice: str = "", speed: float = 1.0):
     names = {i.name for i in sess.get_inputs()}
     feeds = {k: v for k, v in feeds.items() if k in names}
     return np.asarray(sess.run(None, feeds)[0], dtype=np.float32).reshape(-1)
+
+
+def _main() -> None:
+    """Child process for speak_all: JSON {sentences, voice, speed, out} on stdin -> out/000.npy, 001.npy..."""
+    import sys
+
+    import numpy as np
+    req = json.load(sys.stdin)
+    out = Path(req["out"])
+    for i, sentence in enumerate(req["sentences"]):
+        np.save(out / f"{i:03d}.npy", speak(sentence, req.get("voice", ""), float(req.get("speed", 1.0))))
+
+
+if __name__ == "__main__":
+    _main()

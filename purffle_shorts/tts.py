@@ -141,10 +141,10 @@ def _edge(text: str, out: Path, settings: Settings) -> tuple[Path, list[Word], s
 
 
 # Kokoro-82M, local: the voice used when edge-tts is down (kokoro_local: onnxruntime on the CPU, no network).
-# At its own pace (1.0) am_michael speaks ~2.4 words/s with the sentence pauses - the pace the 45-60 s story
-# scripts are written for (0.9 measured 2.1 w/s: most stories would need a length rewrite). KOKORO_SPEED
-# overrides it; TTS_RATE is edge-tts's and does not apply.
-KOKORO_SPEED = 1.0
+# Measured on a 133-word story (numbers spelled out, padding trimmed): speed 1.0 -> 63 s (2.1 words/s, over the
+# 60 s limit), 1.12 -> 59 s. 1.2 matches edge-tts's ~2.5 w/s, the pace the 45-60 s story scripts are written
+# for. KOKORO_SPEED overrides it; TTS_RATE is edge-tts's and does not apply.
+KOKORO_SPEED = 1.2
 KOKORO_SENTENCE_GAP = 0.3   # seconds of silence between sentences (each sentence is spoken separately)
 
 
@@ -189,7 +189,7 @@ def _kokoro_local(text: str, out: Path, settings: Settings) -> tuple[Path, list[
     if not sentences:
         raise PermanentError("nothing to say")
     speed = float(os.getenv("KOKORO_SPEED") or KOKORO_SPEED)
-    parts = [kokoro_local.speak(x, voice, speed) for x in sentences]
+    parts = [kokoro_local.trim(a) for a in kokoro_local.speak_all(sentences, voice, speed, out / "kokoro")]
     path, words = _join_sentences(parts, sentences, kokoro_local.SAMPLE_RATE, out, settings.language,
                                   KOKORO_SENTENCE_GAP)
     return path, words, f"kokoro {voice}"
