@@ -487,7 +487,7 @@ def test_grounding_keeps_more_of_the_article_for_the_checker_than_for_the_writer
     long = "Hampi was a capital. " * 600                                          # 12,600 chars
     seen = {}
 
-    def page(title, lang="en", max_chars=5000):
+    def page(title, lang="en", max_chars=5000, **k):
         seen["max"] = max_chars
         return {"title": title, "url": "u", "text": long[:max_chars], "lat": None, "lon": None}
 

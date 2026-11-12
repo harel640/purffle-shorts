@@ -130,7 +130,8 @@ class Settings:
     fact_check: bool = True           # second LLM pass that strips unsupported numbers/claims
 
     # --- voice ----------------------------------------------------------------------------
-    tts_engine: str = "edge"          # edge|openai|elevenlabs|kokoro|coqui|system|silent
+    tts_engine: str = "edge"          # edge|openai|elevenlabs|kokoro|coqui|piper|system|silent
+    tts_fallback: list[str] = field(default_factory=lambda: ["piper"])  # tried when the engines above fail
     tts_voice: str = ""               # blank = best default for the language; comma list = rotate
     tts_voice_b: str = ""             # second speaker (dialogue and chat formats); blank = automatic
     tts_rate: str = "+8%"             # edge-tts speaking rate
@@ -333,6 +334,7 @@ class Settings:
             safety_filter=_bool(_env("SAFETY_FILTER", "true")),
             fact_check=_bool(_env("FACT_CHECK", "true")),
             tts_engine=_env("TTS_ENGINE", d.tts_engine).lower(),
+            tts_fallback=[x.lower() for x in _list(_env("TTS_FALLBACK", "piper")) if x.lower() != "none"],
             tts_voice=_env("TTS_VOICE"),
             tts_voice_b=_env("TTS_VOICE_B"),
             tts_rate=_env("TTS_RATE", d.tts_rate),

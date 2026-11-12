@@ -75,7 +75,12 @@ VISION_GIVE_UP_STREAK = 6    # consecutive images with no answer, even after som
 
 class SkipTopic(Exception):
     """Raised when a topic can't be made credibly, e.g. too few freely-licensed images of the place.
-    Handled like a travel-advisory skip: the autopilot moves on to another topic."""
+    Handled like a travel-advisory skip: the autopilot moves on to another topic. ``transient``: the topic
+    is fine but a service needed to check it is down (vision, the fact checker) - a later run tries it again."""
+
+    def __init__(self, message: str = "", transient: bool = False):
+        super().__init__(message)
+        self.transient = transient
 
 
 @dataclass
@@ -1334,7 +1339,7 @@ class Visuals:
             if self._vision_unavailable:
                 # The vision check is configured but no model answered: fail closed rather than ship a photo we
                 # could not confirm shows its subject. The launcher logs this as "SKIPPED vision unavailable".
-                raise SkipTopic("vision unavailable — cannot verify a real photo shows its subject")
+                raise SkipTopic("vision unavailable — cannot verify a real photo shows its subject", transient=True)
             if item is None:
                 # The pool is out of photos that pass the vision check, and an unverified photo is never used.
                 # A middle scene may become an AI illustration when AI is allowed (a history-format video: its

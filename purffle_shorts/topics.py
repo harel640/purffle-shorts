@@ -62,9 +62,11 @@ class Topic:
     lon: float | None = None
 
 
-def article_page(title: str, lang: str = "en", max_chars: int = 5000) -> dict | None:
+def article_page(title: str, lang: str = "en", max_chars: int = 5000, *, strict: bool = False) -> dict | None:
     """The Wikipedia article with exactly this ``title`` (redirects followed, never a search - so "Ban Rak
-    Thai" can't turn into a different article): {title, url, text, lat, lon}, or None if it doesn't exist."""
+    Thai" can't turn into a different article): {title, url, text, lat, lon}, or None if it doesn't exist.
+    ``strict``: a failed request raises instead of looking like a missing article (an outage is not a
+    reason to give up on the place)."""
     try:
         r = http().get(f"https://{lang}.wikipedia.org/w/api.php", timeout=20, params={
             "action": "query", "format": "json", "formatversion": 2, "redirects": 1, "titles": title,
@@ -82,6 +84,8 @@ def article_page(title: str, lang: str = "en", max_chars: int = 5000) -> dict | 
                 "lat": co.get("lat"), "lon": co.get("lon")}
     except Exception as e:
         log.warning("Wikipedia article %r failed: %s", title, e)
+        if strict:
+            raise
         return None
 
 
@@ -341,7 +345,9 @@ def from_list(settings: Settings, history: History) -> Topic | None:
         if too_soon:                # not claimed: it stays on the list for a later run
             log.info("Topic list: #%s %s waits - %s", e.get("rank", "?"), place, too_soon)
             continue
-        history.mark_topic(key)    # claimed now: if this video is skipped, the next run takes the next place
+        # Claimed (pending) now: a rule skip uses it up, an outage gives it back (Studio.make), and a run that
+        # was killed leaves a pending claim that frees itself after CLAIM_STALE_HOURS.
+        history.claim_topic(key)
         subject = list_subject(place, region, country)
         log.info("Topic list: #%s %s", e.get("rank", "?"), subject)
         return Topic(subject, "list", key=key, wiki_title=str(e.get("wikipedia_title") or ""), place=place,

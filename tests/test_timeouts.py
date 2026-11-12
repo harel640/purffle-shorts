@@ -69,6 +69,8 @@ def test_edge_passes_explicit_connect_and_receive_timeouts(monkeypatch, tmp_path
 
 
 def test_edge_abandons_a_wedged_attempt_and_the_retry_succeeds(monkeypatch, tmp_path):
+    # The voice-over as a whole is retried by Studio._speak (P6); the in-engine retry still works when enabled.
+    monkeypatch.setattr(tts, "EDGE_ATTEMPTS", 2)
     monkeypatch.setattr(tts, "EDGE_SYNTH_TIMEOUT", 0.3)
     state = _install_fake_edge(monkeypatch, ["hang", "ok"])  # 1st attempt wedges, retry works
     path, words, _ = tts._edge("hello", tmp_path, Settings())
