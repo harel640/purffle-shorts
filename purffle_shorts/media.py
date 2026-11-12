@@ -747,11 +747,12 @@ def visible_subject(query: str, place: str, pool: list[MediaItem]) -> str:
     """What a photo for a middle scene must show, for the vision check: the scene's query without the names
     no photo of the place carries - people ("Aurel Stein Mogao Caves" -> "Mogao Caves"; the strict photo
     question rejected every cave photo for it, Nov 12). A capitalised word stays only when some pool photo's
-    title/categories contain it; with no such landmark name left, the photo must simply show the place."""
+    title/categories contain it. When names were dropped and no landmark name is left ("Stein donation Wang
+    restoration"), the photo must simply show the place; a plain description ("worship hall interior") stays."""
     vocab = {w.lower() for it in pool for w in re.findall(r"[A-Za-z]+", f"{it.text} {it.query}")}
-    kept = [w for w in (query or "").split()
-            if not w[:1].isupper() or re.sub(r"[^a-z]", "", w.lower()) in vocab]
-    if not any(w[:1].isupper() for w in kept):
+    words = (query or "").split()
+    kept = [w for w in words if not w[:1].isupper() or re.sub(r"[^a-z]", "", w.lower()) in vocab]
+    if not kept or (len(kept) < len(words) and not any(w[:1].isupper() for w in kept)):
         return place or (query or "")
     return " ".join(kept)
 

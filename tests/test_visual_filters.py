@@ -82,3 +82,8 @@ def test_a_stock_video_must_name_the_place_not_just_caves_or_china(monkeypatch, 
     assert v._place_stock_video("Aurel Stein", "Mogao Caves", "China", tmp_path, 0) is None
     monkeypatch.setattr(v, "_search", lambda source, q: [clips["mogao"]], raising=False)
     assert v._place_stock_video("Aurel Stein", "Mogao Caves", "China", tmp_path, 0).id == "2"
+
+
+def test_a_plain_description_is_kept_as_the_vision_subject():
+    assert M.visible_subject("worship hall interior", "Tabo Monastery", _pool("File:Tabo gompa.jpg")) == \
+        "worship hall interior"
