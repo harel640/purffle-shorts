@@ -600,9 +600,10 @@ class LLM:
     def _vision_question(self, subject: str) -> str:
         # One question, one call: it must be a PHOTOGRAPH of the place (Vigan, Nov 12: the town's seal passed as
         # "shows Vigan"), and the place must be its main subject.
-        return (f'Is this a real photograph of a place, and does its main subject clearly show {subject}? Answer '
-                f'"no" if it is a seal, logo, emblem, coat of arms, flag, sign, map, chart, diagram or other '
-                f'graphic or drawing, or if it shows a beach, a street, an animal, a person or an unrelated place '
+        return (f'Is this a real photograph of a place, and does its main subject clearly show {subject}? A camera '
+                f'photo of a building, landscape, interior, mural, carving or statue counts as a photograph. Answer '
+                f'"no" if the image itself is a seal, logo, emblem, coat of arms, flag, sign, map, chart, diagram or '
+                f'other flat graphic, or if it shows a beach, a street, an animal, a person or an unrelated place '
                 f'instead of {subject}. Answer only "yes" or "no".')
 
     def vision_available(self) -> bool:
