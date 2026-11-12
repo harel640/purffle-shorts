@@ -145,6 +145,7 @@ def _edge(text: str, out: Path, settings: Settings) -> tuple[Path, list[Word], s
 # 60 s limit), 1.12 -> 59 s. 1.2 matches edge-tts's ~2.5 w/s, the pace the 45-60 s story scripts are written
 # for. KOKORO_SPEED overrides it; TTS_RATE is edge-tts's and does not apply.
 KOKORO_SPEED = 1.2
+KOKORO_AUDIO_VERSION = "2"  # bump when the sentence cutting/joining changes: the voice cache keys on it
 KOKORO_SENTENCE_GAP = 0.3   # seconds of silence between sentences (each sentence is spoken separately)
 
 
@@ -442,6 +443,10 @@ def _cache_dir(text: str, settings: Settings, engine: str) -> Path | None:
         return None
     parts = [engine, settings.tts_voice, settings.language, settings.tts_rate, settings.tts_model,
              settings.tts_instructions if engine == "openai" else "", settings.align, text]
+    if engine == "kokoro":
+        # what changes the local Kokoro audio besides the text: its voice, pace and how it is cut/joined
+        parts += [os.getenv("KOKORO_VOICE") or "", os.getenv("KOKORO_SPEED") or str(KOKORO_SPEED),
+                  KOKORO_AUDIO_VERSION]
     key = hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()[:32]
     return settings.data_path / "cache" / "voice" / key[:2] / key
 
