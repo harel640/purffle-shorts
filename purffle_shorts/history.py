@@ -109,7 +109,12 @@ VIDEO_COLUMNS = {
     "wiki_page": "TEXT",           # its Wikipedia article (canonical title): "Crystal Monastery" == "Shey Gompa"
     "lat": "REAL", "lon": "REAL",  # its coordinates: two names for one spot are the same place
     "country": "TEXT",             # its country, for the per-country pacing rule
+    "topic_key": "TEXT",           # the claim (topics_used.key) this video was made from, e.g. a list place
 }
+TOPIC_COLUMNS = {
+    "pending": "INTEGER",          # 1 = claimed by a run that has not finished with it yet (see topic_used)
+}
+CLAIM_STALE_HOURS = 2.0  # a pending claim this old with no video row was left by a killed run: free it again
 
 
 def now_iso() -> str:
@@ -132,6 +137,10 @@ class History:
             for col, kind in VIDEO_COLUMNS.items():
                 if col not in have:
                     c.execute(f"ALTER TABLE videos ADD COLUMN {col} {kind}")
+            have = {r["name"] for r in c.execute("PRAGMA table_info(topics_used)")}
+            for col, kind in TOPIC_COLUMNS.items():
+                if col not in have:
+                    c.execute(f"ALTER TABLE topics_used ADD COLUMN {col} {kind}")
 
     @contextmanager
     def _db(self) -> Iterator[sqlite3.Connection]:
@@ -311,10 +320,37 @@ class History:
             c.executemany("INSERT OR IGNORE INTO media_used (key, used_at) VALUES (?, ?)", [(k, ts) for k in keys])
 
     def topic_used(self, key: str) -> bool:
-        return bool(self._all("SELECT 1 FROM topics_used WHERE key = ?", (key.lower(),)))
+        """True when ``key`` is taken: used for good, or claimed by a run that is still going. A PENDING claim
+        older than CLAIM_STALE_HOURS with no video row made from it was left by a run that never finished
+        (the launcher's watchdog killed the container): it counts as free again."""
+        rows = self._all("SELECT used_at, pending FROM topics_used WHERE key = ?", (key.lower(),))
+        if not rows:
+            return False
+        if not rows[0]["pending"]:
+            return True
+        try:
+            claimed = datetime.fromisoformat(rows[0]["used_at"])
+        except (TypeError, ValueError):
+            return True
+        if datetime.now(timezone.utc) - claimed < timedelta(hours=CLAIM_STALE_HOURS):
+            return True
+        return bool(self._all("SELECT 1 FROM videos WHERE topic_key = ? LIMIT 1", (key.lower(),)))
 
     def mark_topic(self, key: str) -> None:
-        self._exec("INSERT OR IGNORE INTO topics_used (key, used_at) VALUES (?, ?)", (key.lower(), now_iso()))
+        """Use a topic for good."""
+        self._exec("INSERT INTO topics_used (key, used_at, pending) VALUES (?, ?, NULL) "
+                   "ON CONFLICT(key) DO UPDATE SET pending = NULL", (key.lower(), now_iso()))
+
+    def claim_topic(self, key: str) -> None:
+        """Take a topic for the run now starting: pending until the run finishes with it (finish_topic) or
+        gives it back (release_topic). A stale pending claim (topic_used) is taken over with a fresh time."""
+        self._exec("INSERT INTO topics_used (key, used_at, pending) VALUES (?, ?, 1) "
+                   "ON CONFLICT(key) DO UPDATE SET used_at = excluded.used_at, pending = 1",
+                   (key.lower(), now_iso()))
+
+    def finish_topic(self, key: str) -> None:
+        """The run is done with its claim - a video was made, or the place broke a rule: used for good."""
+        self._exec("UPDATE topics_used SET pending = NULL WHERE key = ?", (key.lower(),))
 
     def release_topic(self, key: str) -> None:
         """Un-claim a topic (e.g. a listed place skipped only because a check could not run) so a later run

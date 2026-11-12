@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import random
+import re
 import shutil
 import subprocess
 import sys
@@ -93,7 +94,25 @@ def _rate_multiplier(rate: str) -> float:
 # wall-clock ceiling and we retry once. Keep the ceiling well under the launcher's docker-run watchdog.
 EDGE_CONNECT_TIMEOUT = 15   # seconds to open the websocket
 EDGE_RECEIVE_TIMEOUT = 30   # seconds to wait for each audio / word-boundary message
-EDGE_SYNTH_TIMEOUT = 120    # hard ceiling on one whole synthesis attempt
+EDGE_SYNTH_TIMEOUT = 60     # hard ceiling on one whole synthesis attempt (a 150-word story takes ~40 s)
+EDGE_ATTEMPTS = 1           # per call: the voice-over as a whole is retried (Studio._speak, VOICE_ATTEMPTS)
+
+
+class VoiceUnavailable(RuntimeError):
+    """Every voice engine failed: an outage, not a problem with the topic (a later run tries it again)."""
+    transient = True
+
+
+# Piper: a local voice that needs no network, the fallback when edge-tts is down. It runs as its own program
+# (the `piper` command of the piper-tts package, GPL-3.0 - never imported). The model path comes from
+# PIPER_VOICE (the Docker image ships en_US "norman", trained on public-domain LibriVox readings).
+PIPER_DEFAULT_VOICE = "/opt/piper-voices/en_US-norman-medium.onnx"
+PIPER_SENTENCE_GAP = 0.32   # seconds of silence between sentences (Piper speaks each one separately)
+PIPER_TIMEOUT = 180
+# Piper's own pace is ~3.2 words/s - quick for documentary narration and well above the ~2.4 w/s the 45-60 s
+# story scripts are written for. 1.2 = 20% longer phonemes (~2.6 w/s with the sentence pauses).
+# PIPER_LENGTH_SCALE overrides it; TTS_RATE is edge-tts's and does not apply.
+PIPER_LENGTH_SCALE = 1.2
 
 
 # ------------------------------------------------------------------------------------------ engines
@@ -129,8 +148,63 @@ def _edge(text: str, out: Path, settings: Settings) -> tuple[Path, list[Word], s
         return words
 
     words = with_retries(lambda: run_with_timeout(_do, EDGE_SYNTH_TIMEOUT, f"edge-tts {voice}"),
-                         attempts=2, label=f"edge-tts {voice}")
+                         attempts=EDGE_ATTEMPTS, label=f"edge-tts {voice}")
     return path, words, voice
+
+
+def _piper_sentences(text: str) -> list[str]:
+    return [x for x in re.split(r"(?<=[.!?])\s+", " ".join((text or "").split())) if x.strip()]
+
+
+def _piper(text: str, out: Path, settings: Settings) -> tuple[Path, list[Word], str]:
+    """Voice ``text`` with Piper, one sentence at a time (one `piper` call; it writes a WAV per input line),
+    joined with a short pause. Each sentence's start is then exact, and the words inside it are timed in
+    proportion - so captions stay in step without a word aligner."""
+    if settings.language.split("-")[0] != "en":
+        raise PermanentError(f"the Piper voice is English only (language {settings.language})")
+    exe = shutil.which("piper")
+    model = Path(settings.tts_voice if settings.tts_voice.endswith(".onnx") else
+                 os.getenv("PIPER_VOICE") or PIPER_DEFAULT_VOICE)
+    if not exe or not model.exists():
+        raise PermanentError(f"Piper is not available (piper command: {exe or 'missing'}, voice: {model})")
+    sentences = _piper_sentences(text)
+    if not sentences:
+        raise PermanentError("nothing to say")
+    parts_dir = out / "piper"
+    shutil.rmtree(parts_dir, ignore_errors=True)
+    parts_dir.mkdir(parents=True)
+    cmd = [exe, "-m", str(model), "-d", str(parts_dir),
+           "--length-scale", f"{float(os.getenv('PIPER_LENGTH_SCALE') or PIPER_LENGTH_SCALE):.3f}"]
+    try:
+        subprocess.run(cmd, input="\n".join(sentences) + "\n", text=True, capture_output=True, check=True,
+                       timeout=PIPER_TIMEOUT)
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"piper failed: {(e.stderr or '').strip()[-300:]}") from e
+    wavs = sorted(parts_dir.glob("*.wav"))      # named by a timestamp: sorted = spoken order
+    if len(wavs) != len(sentences):
+        raise RuntimeError(f"piper wrote {len(wavs)} file(s) for {len(sentences)} sentence(s)")
+    path = out / "voice.wav"
+    words: list[Word] = []
+    t = 0.0
+    with wave.open(str(path), "wb") as dst:
+        for i, (wav, sentence) in enumerate(zip(wavs, sentences)):
+            with wave.open(str(wav), "rb") as src:
+                if i == 0:
+                    dst.setnchannels(src.getnchannels())
+                    dst.setsampwidth(src.getsampwidth())
+                    dst.setframerate(src.getframerate())
+                rate, frames = src.getframerate(), src.readframes(src.getnframes())
+            dur = len(frames) / (rate * src.getsampwidth() * src.getnchannels())
+            words += [Word(w.text, round(w.start + t, 3), round(w.end + t, 3))
+                      for w in estimate_timings(tokenize(sentence, settings.language), dur, lead=0.05, tail=0.1)]
+            dst.writeframes(frames)
+            t += dur
+            if i + 1 < len(wavs):
+                gap = int(PIPER_SENTENCE_GAP * rate)
+                dst.writeframes(b"\x00" * gap * src.getsampwidth() * src.getnchannels())
+                t += gap / rate
+    shutil.rmtree(parts_dir, ignore_errors=True)
+    return path, words, model.stem
 
 
 def _openai(text: str, out: Path, settings: Settings) -> tuple[Path, list[Word], str]:
@@ -271,7 +345,8 @@ def _silent(text: str, out: Path, settings: Settings) -> tuple[Path, list[Word],
 
 
 _ENGINE_FUNCS = {"edge": _edge, "openai": _openai, "elevenlabs": _elevenlabs, "kokoro": _kokoro,
-                 "coqui": _coqui, "system": _system, "silent": _silent}
+                 "coqui": _coqui, "piper": _piper, "system": _system, "silent": _silent}
+NETWORK_ENGINES = {"edge", "openai", "elevenlabs"}       # may fail for a while and then work again
 
 
 # ------------------------------------------------------------------------------------------ aligners
@@ -362,7 +437,7 @@ def _align(audio: Path, settings: Settings, text: str = "") -> tuple[list[Word],
 
 
 # ------------------------------------------------------------------------------------------ voice cache
-CACHED_ENGINES = {"edge", "openai", "elevenlabs", "kokoro", "coqui"}
+CACHED_ENGINES = {"edge", "openai", "elevenlabs", "kokoro", "coqui", "piper"}
 CACHE_LIMIT_MB = 400
 
 
@@ -438,7 +513,8 @@ def synthesize(text: str, out_dir: Path, settings: Settings) -> Speech:
         raise RuntimeError(f"{engine} produced unreadable audio: {audio}")
     tokens = tokenize(text, settings.language)
     if native:
-        words, timing = transfer_timings(tokens, native, dur), "native"
+        # Piper's words are timed per sentence (exact sentence starts, proportional inside)
+        words, timing = transfer_timings(tokens, native, dur), "sentence" if engine == "piper" else "native"
     elif engine == "silent":
         words, timing = estimate_timings(tokens, dur), "estimated"
     else:
@@ -507,7 +583,7 @@ def synthesize_lines(lines: list[tuple[str, str]], out_dir: Path, settings: Sett
     ffmpeg.run(["-f", "concat", "-safe", "0", "-i", "lines.txt", "-c:a", "pcm_s16le", str(audio.name)],
                label="join voices", cwd=out_dir)
     dur = ffmpeg.duration(audio)
-    timing = min((p.timing for p in parts), key=["estimated", "anchored", "aligned", "native"].index)
+    timing = min((p.timing for p in parts), key=["estimated", "anchored", "sentence", "aligned", "native"].index)
     voices = "/".join(dict.fromkeys(p.voice for p in parts))
     log.info("Voices: %s, %.1fs, %d lines, %d words (%s timing)", voices, dur, len(lines), len(words), timing)
     return Speech(audio=audio, words=words, duration=dur, engine=parts[0].engine, voice=voices, timing=timing,

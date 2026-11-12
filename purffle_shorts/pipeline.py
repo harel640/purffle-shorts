@@ -11,17 +11,20 @@ import logging
 import os
 import re
 import shutil
+import socket
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
+import requests
+
 from . import analytics, crosspost, ffmpeg, notify, seo, sfx, topics, tts, youtube
 from .config import Settings
 # Place de-duplication lives in history.py (no heavy imports) so other tools can apply the same rule.
 from .history import PLACE_REUSE_DAYS, History, now_iso, place_recently_used  # noqa: F401 (re-exported)
-from .llm import LLM, LLMConfigError
+from .llm import LLM, LLMConfigError, LLMError
 from . import factcheck, safety
 from .media import MediaItem, NeuronBudget, SkipTopic, Visuals, background_item, resolve_place
 from .overlays import EMOJI_CREDIT, ChatMessage, build_overlays
@@ -48,7 +51,7 @@ from .script import (
 )
 from .timing import SceneTiming, caption_chunks, scene_timeline, split_shots, srt, tokenize
 from .topics import Topic, pick_topic
-from .utils import Cancelled, check_cancel, redact, slugify, truncate_words
+from .utils import Cancelled, PermanentError, check_cancel, redact, run_with_timeout, slugify, truncate_words
 
 log = logging.getLogger("purffle")
 
@@ -146,6 +149,36 @@ def _future(iso: str | None) -> datetime | None:
     except ValueError:
         return None
     return t if t > datetime.now(timezone.utc) else None
+
+
+VOICE_ATTEMPTS = 3           # tries of a network voice (edge-tts) per voice-over...
+VOICE_ATTEMPT_SECONDS = 60   # ...each bounded by this...
+VOICE_RETRY_WAIT = 20        # ...and this far apart, before the local fallback voice is used
+
+
+def failure_kind(e: BaseException) -> str:
+    """Why a run ended without a video, for the place it was making:
+    "rule"      - the place broke a rule (safety, sensitive region, modern attraction, duplicate, recent
+                  violence, length gate, unsupported claims): it stays used;
+    "transient" - something needed was down (every LLM, every voice, vision, the fact checker, the network):
+                  the place is given back for a later run;
+    "error"     - anything else (a bug): the place stays used, so one broken place cannot stall the list."""
+    if isinstance(e, (SkipTopic, safety.UnsafeTopic)):
+        return "transient" if getattr(e, "transient", False) else "rule"
+    if isinstance(e, factcheck.NothingSupported):
+        return "rule"
+    seen: set[int] = set()
+    x: BaseException | None = e
+    while x is not None and id(x) not in seen:          # the error itself, or what caused it
+        seen.add(id(x))
+        if (getattr(x, "transient", False)
+                or isinstance(x, (tts.VoiceUnavailable, factcheck.FactCheckUnavailable, ConnectionError,
+                                  TimeoutError, socket.timeout, socket.gaierror,
+                                  requests.ConnectionError, requests.Timeout))
+                or (isinstance(x, LLMError) and not isinstance(x, LLMConfigError))):
+            return "transient"
+        x = x.__cause__ or x.__context__
+    return "error"
 
 
 MAX_IMAGE_SECONDS = 8.0      # no picture of a story stays on screen longer than this
@@ -288,7 +321,11 @@ def grounding_article(pick: Topic, lang: str = "en") -> tuple[str, str]:
     if not pick.wiki_title:
         text, url = topics.article(pick.subject, lang, max_chars=factcheck.SOURCE_FETCH_CHARS)
     else:
-        page = topics.article_page(pick.wiki_title, lang, max_chars=factcheck.SOURCE_FETCH_CHARS)
+        try:
+            page = topics.article_page(pick.wiki_title, lang, max_chars=factcheck.SOURCE_FETCH_CHARS, strict=True)
+        except Exception as e:
+            raise SkipTopic(f"Wikipedia could not be reached for {pick.wiki_title!r} ({redact(e)})",
+                            transient=True) from e
         if not page:
             raise SkipTopic(f"Wikipedia article {pick.wiki_title!r} for this listed place not found")
         pick.wiki_title = page["title"]
@@ -467,24 +504,46 @@ class Studio:
 
     # ------------------------------------------------------------------ voice with fallbacks
     def _speak(self, script: Script, work: Path, s: Settings) -> tts.Speech:
+        """The voice-over, from the first engine that works: TTS_ENGINE, then edge-tts, then TTS_FALLBACK (Piper,
+        local). A network engine gets VOICE_ATTEMPTS tries of VOICE_ATTEMPT_SECONDS each, VOICE_RETRY_WAIT apart
+        (an edge-tts outage once cost two list places in one evening). If nothing works: VoiceUnavailable, a
+        transient failure - the run ends and the place is given back, rather than moving on to burn the next."""
         engines = [s.tts_engine]
         if s.tts_engine != "edge":
             engines.append("edge")
+        engines += [e for e in s.tts_fallback if e in tts._ENGINE_FUNCS]
         if s.offline:
             engines += ["system", "silent"]
+        engines = list(dict.fromkeys(engines))
         lines = [(sc.speaker, sc.narration) for sc in script.scenes] if (
             script.multi_speaker or script.style in MULTI_SPEAKER) else None
         last: Exception | None = None
-        for eng in dict.fromkeys(engines):
-            try:
-                cfg = s if eng == s.tts_engine else replace(s, tts_engine=eng, tts_voice="", tts_voice_b="")
+        for eng in engines:
+            cfg = s if eng == s.tts_engine else replace(s, tts_engine=eng, tts_voice="", tts_voice_b="")
+            tries = VOICE_ATTEMPTS if eng in tts.NETWORK_ENGINES else 1
+
+            def _once(cfg=cfg):
                 if lines:
                     return tts.synthesize_lines(lines, work / "voice", cfg)
                 return tts.synthesize(script.narration, work, cfg)
-            except Exception as e:
-                last = e
-                log.warning("Voice engine '%s' failed: %s", eng, e)
-        raise RuntimeError(f"All voice engines failed: {last}")
+            for k in range(1, tries + 1):
+                try:
+                    speech = (run_with_timeout(_once, VOICE_ATTEMPT_SECONDS, f"{eng} voice-over")
+                              if eng in tts.NETWORK_ENGINES else _once())
+                except PermanentError as e:            # not installed / not usable here: no point retrying
+                    last = e
+                    log.warning("Voice engine '%s' unavailable: %s", eng, e)
+                    break
+                except Exception as e:  # noqa: BLE001
+                    last = e
+                    log.warning("Voice engine '%s' attempt %d/%d failed: %s", eng, k, tries, redact(e))
+                    if k < tries:
+                        time.sleep(VOICE_RETRY_WAIT)
+                    continue
+                note = "" if eng == engines[0] else f" - fallback, {', '.join(engines[:engines.index(eng)])} failed"
+                log.info("Voice used: %s (%s)%s", eng, speech.voice, note)
+                return speech
+        raise tts.VoiceUnavailable(f"All voice engines failed: {last}")
 
     @staticmethod
     def _listed(pick: Topic) -> bool:
@@ -518,13 +577,30 @@ class Studio:
                                 lat=lat, lon=lon)
         return safety.check(pick.subject, self.llm)
 
-    def _release_if_transient(self, pick: Topic, e: BaseException) -> None:
-        """A listed place skipped only because a check could not run (LLM or advisory feed down) is not used
-        up: its claim is released so a later run takes it again."""
-        if getattr(e, "transient", False) and pick.source == "list" and pick.key:
-            self.history.release_topic(pick.key)
-            log.info("Topic list: %s released - the check could not run; a later run will try it again",
-                     pick.place or pick.subject)
+    def _settle_claim(self, pick: Topic, e: BaseException) -> None:
+        """After a run that made no video: a listed place skipped only because something it needed was down
+        (failure_kind "transient"), or a cancelled run, gives its claim back so a later run takes it again;
+        any other end uses the claim up for good."""
+        if not pick.key:
+            return
+        if isinstance(e, (Cancelled, KeyboardInterrupt)) or failure_kind(e) == "transient":
+            if pick.source == "list" and self.history.topic_used(pick.key):
+                self.history.release_topic(pick.key)
+                log.info("Topic list: %s released - a later run will try it again", pick.place or pick.subject)
+        else:
+            self.history.finish_topic(pick.key)
+
+    def _end_run(self, pick: Topic | None, e: BaseException) -> str:
+        """Settle the topic's claim after a run that made no video, and say in ONE line what ended it."""
+        kind = failure_kind(e)
+        name = (pick.place or pick.subject) if pick is not None else "no topic"
+        if pick is not None:
+            self._settle_claim(pick, e)
+        what = {"transient": "TRANSIENT failure (an outage, not the place) - the place is given back",
+                "rule": "RULE skip - the place stays used",
+                "error": "ERROR - the place stays used"}[kind]
+        log.warning("Run ended by a %s: %s (%s)", what, name, redact(e))
+        return kind
 
     def _claim_check(self, script: Script, pick: Topic, *, kinds: tuple[str, ...] | None = None,
                      title_len: int = 60, known: dict | None = None) -> Script:
@@ -542,7 +618,7 @@ class Studio:
             if explicit:
                 log.warning("Claim check skipped (%s); the topic was chosen by hand, continuing", redact(e))
                 return script
-            raise SkipTopic(f"fact check unavailable: {redact(e)}") from e
+            raise SkipTopic(f"fact check unavailable: {redact(e)}", transient=True) from e
         except factcheck.NothingSupported as e:
             raise SkipTopic(f"story not supported by its source: {e}") from e
         pick.claim_reports.append(report)
@@ -606,6 +682,7 @@ class Studio:
             pick = topics.from_document(document)
         else:
             pick = pick_topic(s, self.history, explicit=topic, source=source)
+        self._pick = pick                  # make() settles its claim if the run ends in the draft stage
         if topic and (url or document):
             pick.subject = f"{topic} (source: {pick.subject})"
         log.info("Topic [%s]: %s", pick.source, pick.subject)
@@ -692,7 +769,7 @@ class Studio:
         except BaseException as e:
             if pick.idea_id:
                 self.history.release_idea(pick.idea_id)
-            self._release_if_transient(pick, e)
+            self._settle_claim(pick, e)
             raise
         if standalone:
             self._step("done", script.title)
@@ -734,31 +811,41 @@ class Studio:
                     if s.fact_check:
                         script = factcheck.scrub(self.llm, script, s)
             else:
+                self._pick = None
                 script, pick, writer = self.draft(topic, source=source, style=style, url=url, document=document)
-            return self.produce(script, pick, writer, upload=upload, t0=t0, languages=languages, state=state)
+            r = self.produce(script, pick, writer, upload=upload, t0=t0, languages=languages, state=state)
+            if pick.key:
+                self.history.finish_topic(pick.key)      # a video was made from it: used for good
+            return r
         except (youtube.NotAuthorized, LLMConfigError, KeyboardInterrupt):
             raise  # setup problems stop the run instead of failing every video the same way
         except Cancelled:
             if pick is not None and pick.idea_id and not state.get("record_id"):
                 self.history.release_idea(pick.idea_id)
+            if pick is not None and not state.get("record_id"):
+                self._settle_claim(pick, Cancelled())
             if state.get("folder") and not state.get("record_id"):
                 shutil.rmtree(state["folder"], ignore_errors=True)  # nothing usable was made
             log.info("Stopped: the job was cancelled")
             raise
         except safety.UnsafeTopic as e:
-            if pick is not None:                       # produce stage (a draft-stage skip is released in draft)
-                self._release_if_transient(pick, e)
             log.warning("Skipped (travel advisory): %s", redact(e))
+            self._end_run(pick or getattr(self, "_pick", None), e)
             return Result(False, folder=state.get("folder"), status="skipped", error=str(e),
                           seconds=time.time() - t0)
         except SkipTopic as e:
             log.warning("Skipped (visuals): %s", redact(e))
+            self._end_run(pick or getattr(self, "_pick", None), e)
             return Result(False, folder=state.get("folder"), status="skipped", error=str(e),
                           seconds=time.time() - t0)
         except Exception as e:
             if pick is not None and pick.idea_id and not state.get("record_id"):
                 self.history.release_idea(pick.idea_id)
             log.error("Video failed: %s", redact(e), exc_info=log.isEnabledFor(logging.DEBUG))
+            if not state.get("record_id"):
+                self._end_run(pick or getattr(self, "_pick", None), e)
+            elif pick is not None and pick.key:
+                self.history.finish_topic(pick.key)      # the video exists (e.g. its upload failed)
             notify.send(s, "failed", title=getattr(script, "title", "") or (pick.subject if pick else ""),
                         detail=redact(e))
             return Result(False, folder=state.get("folder"), status="failed", error=redact(e),
@@ -1008,7 +1095,8 @@ class Studio:
                 llm=meta["llm"], voice=meta["voice"], status="rendered", score=script.score, parent_id=parent_id,
                 resolved_place=(", ".join(x for x in (place, country) if x) or None),
                 wiki_page=wiki_page or None, lat=coords[0] if coords else None, lon=coords[1] if coords else None,
-                country=(pick.country or country or None))
+                country=(pick.country or country or None),
+                topic_key=(pick.key.lower() if pick.key and not parent_id else None))
             state["record_id"] = rid
             if not media_map:
                 self.history.mark_media([m.key for m in media if m.source not in REUSABLE_SOURCES])
