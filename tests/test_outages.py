@@ -372,3 +372,15 @@ def test_without_the_model_kokoro_needs_its_package(monkeypatch, tmp_path):
     monkeypatch.setitem(sys.modules, "kokoro", None)          # the optional package is not installed
     with pytest.raises(PermanentError, match="KOKORO_DIR"):
         tts._kokoro("Hello.", tmp_path, Settings())
+
+
+def test_the_voice_cache_does_not_reuse_kokoro_audio_made_at_another_pace(monkeypatch, tmp_path):
+    s = Settings(data_dir=str(tmp_path), tts_engine="kokoro")
+    monkeypatch.delenv("KOKORO_SPEED", raising=False)
+    a = tts._cache_dir("Hello there.", s, "kokoro")
+    monkeypatch.setenv("KOKORO_SPEED", "0.9")
+    b = tts._cache_dir("Hello there.", s, "kokoro")
+    monkeypatch.setattr(tts, "KOKORO_AUDIO_VERSION", "old")
+    monkeypatch.delenv("KOKORO_SPEED")
+    c = tts._cache_dir("Hello there.", s, "kokoro")
+    assert len({a, b, c}) == 3
