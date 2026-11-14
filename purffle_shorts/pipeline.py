@@ -28,7 +28,7 @@ from .llm import LLM, LLMConfigError, LLMError
 from . import factcheck, safety
 from .media import MediaItem, NeuronBudget, SkipTopic, Visuals, background_item, resolve_place
 from .overlays import EMOJI_CREDIT, ChatMessage, build_overlays
-from .render import pick_cover, render_video, split_sizes
+from .render import pick_cover, render_problems, render_video, split_sizes
 from .script import (
     HISTORY_RANGE,
     AUTO_STYLES,
@@ -1058,6 +1058,13 @@ class Studio:
             if (info["width"], info["height"]) != s.resolution or abs(info["duration"] - total) > 0.5:
                 raise RuntimeError(f"Render check failed: got {info['width']}x{info['height']} "
                                    f"{info['duration']:.2f}s, expected {s.width}x{s.height} {total:.2f}s")
+            # Never publish a render that froze (one stuck on a single picture for 50 s once passed the checks
+            # above) or whose picture and sound differ in length: nothing is uploaded, and as the place itself
+            # is fine it is given back for a later run (transient).
+            problems = render_problems(video)
+            if problems:
+                log.warning("SKIPPED frozen render: %s (kept for inspection: %s)", "; ".join(problems), video)
+                raise SkipTopic(f"frozen render: {'; '.join(problems)}", transient=True)
             cover_at = pick_cover(video, folder / "cover.jpg", work, total=total, avoid=[st.start for st in shots[1:]],
                                   until=card_until or plan.hook_until or min(2.8, total * 0.4))
             (folder / "captions.srt").write_text(srt(chunks), encoding="utf-8")

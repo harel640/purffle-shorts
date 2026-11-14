@@ -195,3 +195,75 @@ def test_music_and_bed_both_duck(monkeypatch, tmp_path):
     R.mix_audio(Settings(), tmp_path / "v.wav", 50.0, tmp_path / "m.mp3", tmp_path, ambience=bed)
     g = graphs[0]
     assert "asplit=3[voice][sc0][sc1]" in g and "[mus][sc0]" in g and "[amb][sc1]" in g and "lowpass=f=700" in g
+
+
+# ------------------------------------------------------------------ 5. post-render check: frozen / out of sync
+def _probe(vd=55.2, ad=55.2):
+    return {"duration": max(vd, ad), "width": 1080, "height": 1920, "has_audio": True, "has_video": True,
+            "video_duration": vd, "audio_duration": ad}
+
+
+def test_a_render_frozen_to_the_end_is_caught(monkeypatch, tmp_path):
+    # Nov 14: frozen from 5.33 s to the end (freezedetect prints no freeze_end), video 0.5 s short of the audio
+    monkeypatch.setattr(FF, "probe", lambda p: _probe(54.7, 55.2))
+    monkeypatch.setattr(FF, "run", lambda args, **k: "[freezedetect @ 0x1] lavfi.freezedetect.freeze_start: 5.33333")
+    assert R.render_problems(tmp_path / "v.mp4") == ["frozen 5.3-54.7s"]
+
+
+def test_short_freezes_and_small_gaps_pass(monkeypatch, tmp_path):
+    monkeypatch.setattr(FF, "probe", lambda p: _probe(55.0, 55.3))
+    monkeypatch.setattr(FF, "run", lambda args, **k: "freeze_start: 10.0\nfreeze_duration: 1.9\nfreeze_end: 11.9")
+    assert R.render_problems(tmp_path / "v.mp4") == []
+
+
+def test_a_long_freeze_in_the_middle_and_a_sync_gap_are_both_reported(monkeypatch, tmp_path):
+    seen = {}
+    monkeypatch.setattr(FF, "probe", lambda p: _probe(50.0, 55.0))
+
+    def run(args, **k):
+        seen["vf"] = args[args.index("-vf") + 1]
+        return "freeze_start: 12.0\nfreeze_end: 15.5\n"
+    monkeypatch.setattr(FF, "run", run)
+    assert R.render_problems(tmp_path / "v.mp4") == ["video 50.00s vs audio 55.00s", "frozen 12.0-15.5s"]
+    assert "crop=iw:ih*0.18:0:ih*0.18" in seen["vf"] and "freezedetect=n=-60dB:d=2.0" in seen["vf"]
+
+
+def test_a_frozen_render_is_not_published_and_the_place_is_given_back(tmp_path, monkeypatch, caplog):
+    import logging
+    from datetime import datetime, timezone
+
+    from purffle_shorts import pipeline as P
+    from purffle_shorts import topics as T
+    from purffle_shorts.media import SkipTopic
+    lst = tmp_path / "topic-list.json"
+    lst.write_text(json.dumps({"generated": datetime.now(timezone.utc).isoformat(),
+                               "places": [{"place": "Mogao Caves", "region": "Gansu", "country": "China"}]}))
+    st = P.Studio(Settings(output_dir=str(tmp_path / "o"), data_dir=str(tmp_path / "d"), upload=True,
+                           privacy="private", safety_filter=False, topic_list_file=str(lst)))
+
+    def draft(*a, **k):
+        pick = T.from_list(st.s, st.history)
+        st._pick = pick
+        from purffle_shorts.script import Scene, Script
+        return Script(topic="t", title="t", hook_text="h", description="d", scenes=[Scene("x", "q")]), pick, "w"
+
+    def produce(*a, **k):                         # what produce() does when render_problems finds a freeze
+        logging.getLogger("purffle").warning("SKIPPED frozen render: frozen 5.3-54.7s (kept for inspection)")
+        raise SkipTopic("frozen render: frozen 5.3-54.7s", transient=True)
+    monkeypatch.setattr(st, "draft", draft)
+    monkeypatch.setattr(st, "produce", produce)
+    caplog.set_level(logging.INFO, logger="purffle")
+    r = st.make()
+    assert not r.ok and r.status == "skipped"
+    key = f"list:{datetime.now(timezone.utc).date().isoformat()}:mogao caves|china"
+    assert not st.history.topic_used(key)                                       # given back
+    assert any("SKIPPED frozen render" in x.getMessage() for x in caplog.records)
+    assert any("TRANSIENT" in x.getMessage() for x in caplog.records)
+
+
+def test_produce_runs_the_check_before_anything_is_saved_or_uploaded():
+    import inspect
+
+    from purffle_shorts import pipeline as P
+    src = inspect.getsource(P.Studio.produce)
+    assert src.index("render_problems(video)") < src.index("self.history.add_video(") < src.index("self.upload_record(")
