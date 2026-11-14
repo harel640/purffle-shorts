@@ -50,6 +50,40 @@ for name, (url, want) in files.items():
         raise SystemExit(f"{name}: sha256 {h.hexdigest()} != pinned {want}")
 print("kokoro model ok")
 EOF
+
+# 2.5D parallax: Depth Anything V2 SMALL (Apache-2.0; the larger sizes are CC-BY-NC), ONNX export from
+# onnx-community/depth-anything-v2-small (Apache-2.0). Ambient beds: CC0 / public-domain recordings from
+# Wikimedia Commons (authors and licences in purffle_shorts/ambience.py). Every file is checked by SHA-256.
+ARG DEPTH_REV=4472b7362082ad9968fee890ca0f1e5aca36b93d
+ENV DEPTH_DIR=/opt/depth AMBIENCE_DIR=/opt/ambience
+RUN python - <<'EOF'
+import hashlib, os, urllib.request
+up = "https://upload.wikimedia.org/wikipedia/commons/"
+files = {
+    "/opt/depth/model.onnx": (
+        f"https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/{os.environ['DEPTH_REV']}/onnx/model.onnx",
+        "afb6a5c28f3b6bf1618c6e43f02073ef9dfdc70e937502d51603e57b0a1df10c"),
+    "/opt/ambience/temple.ogg": (up + "a/a6/Windglockenspiel.Koshi.ogg",
+                                 "1f8b33ad604ef9ff5ba1ad901401b6d182f9db94e28f62a5ed930ff2f281b741"),
+    "/opt/ambience/stream.wav": (up + "5/54/433589_jackthemurray_stream-river-water-up-close.wav",
+                                 "be201d2fd0d110fc3ef5d8af060e5ac48439fd54e9f26ce6b69825182748a95b"),
+    "/opt/ambience/sea.ogg": (up + "6/64/Ocean_Waves_on_a_Tropical_Beach.ogg",
+                              "bae2fc0a0c1d36f43494883d9455ad151fc747a0770876b25436422ea8736e55"),
+    "/opt/ambience/forest.ogg": (up + "0/0a/20090610_0_ambience.ogg",
+                                 "43848c3eda5f42829f1033112c2a91ba3e5c91b79a0532fda264c9f59856d431"),
+}
+ua = {"User-Agent": "PurffleShorts-build/1.0 (+https://github.com/Chamanrajragu/purffle-shorts)"}
+for dest, (url, want) in files.items():
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    h = hashlib.sha256()
+    with urllib.request.urlopen(urllib.request.Request(url, headers=ua), timeout=600) as r, open(dest, "wb") as f:
+        while chunk := r.read(1 << 20):
+            h.update(chunk)
+            f.write(chunk)
+    if h.hexdigest() != want:
+        raise SystemExit(f"{dest}: sha256 {h.hexdigest()} != pinned {want}")
+print("depth model and ambience ok")
+EOF
 COPY pyproject.toml README.md LICENSE ./
 COPY purffle_shorts ./purffle_shorts
 RUN pip install --no-cache-dir --no-deps .

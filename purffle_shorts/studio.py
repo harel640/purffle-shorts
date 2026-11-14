@@ -176,7 +176,7 @@ class StudioServer:
             "caption_style": _choice(p.get("caption_style"), CAPTION_STYLES),
             "caption_position": _choice(p.get("caption_position"), ("upper", "center", "lower")),
             "color_grade": _choice(p.get("grade"), GRADES),
-            "transition": _choice(p.get("transition"), ["random", "none", *TRANSITIONS]),
+            "transition": _choice(p.get("transition"), ["motion", "random", "none", *TRANSITIONS]),
             "llm_provider": str(p.get("provider") or "").strip().lower() or None,
             "llm_model": str(p.get("model") or "").strip()[:120] or None,
             "script_review": _choice(p.get("review"), ("off", "score", "rewrite")),
@@ -372,7 +372,7 @@ class StudioServer:
         ready = set(available_providers(self.settings))
         return {"styles": STYLES, "languages": LANGUAGES, "aspects": list(ASPECTS),
                 "caption_styles": list(CAPTION_STYLES), "grades": list(GRADES),
-                "transitions": ["random", "none", *TRANSITIONS],
+                "transitions": ["motion", "random", "none", *TRANSITIONS],
                 "providers": [{"name": n, "label": p.label, "ready": n in ready or p.local}
                               for n, p in PRESETS.items()],
                 "tts": ["edge", "openai", "elevenlabs", "kokoro", "coqui", "system"],

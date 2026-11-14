@@ -30,7 +30,24 @@ GRADES = {
 }
 TRANSITIONS = ["fade", "smoothleft", "smoothup", "slideleft", "slideup", "circleopen", "wipeleft",
                "zoomin", "dissolve", "radial", "hblur", "fadeblack", "squeezeh"]
-GRADIENT_PALETTES = [("0x0f2027", "0x2c5364"), ("0x41295a", "0x2f0743"), ("0x1f1c2c", "0x928dab"),
+# TRANSITION=motion: quick camera-move transitions between scenes - whip pans (a fast slide sideways or up/down,
+# with the whoosh effect on top) and push-ins (zoom into the next picture); never the same one twice in a row.
+WHIP_PANS = ["slideleft", "slideright", "slideup", "slidedown"]
+PUSH_INS = ["zoomin"]
+
+
+def motion_transitions(n: int, rng: random.Random | None = None) -> list[str]:
+    """``n`` motion transitions: about two whip pans to each push-in, no two in a row the same."""
+    rng = rng or random
+    out: list[str] = []
+    for _ in range(n):
+        pool = PUSH_INS if (rng.random() < 0.34 and (not out or out[-1] not in PUSH_INS)) else WHIP_PANS
+        pick = rng.choice([t for t in pool if not out or t != out[-1]] or pool)
+        out.append(pick)
+    return out
+
+
+GRADIENT_PALETTES =[("0x0f2027", "0x2c5364"), ("0x41295a", "0x2f0743"), ("0x1f1c2c", "0x928dab"),
                      ("0x16222a", "0x3a6073"), ("0x3a1c71", "0xd76d77"), ("0x0b486b", "0xf56217")]
 MUSIC_EXT = {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac"}
 
@@ -79,6 +96,33 @@ def _image_vf(iw: int, ih: int, W: int, H: int, F: int, frames: int, ken_burns: 
     return f"scale={W}:{H}:force_original_aspect_ratio=increase:flags=lanczos,crop={W}:{H},setsar=1{grade}"
 
 
+# 2.5D parallax (an image with a depth map, see depth.py): the picture is worked at PARALLAX_SCALE x the output
+# size; near pixels slide up to PARALLAX_X px sideways (and PARALLAX_Y px vertically) over the shot while the
+# far ones stay put, so foreground and background move separately; a slow zoom runs on top.
+PARALLAX_SCALE = 1.5
+PARALLAX_X = 36
+PARALLAX_Y = 10
+PARALLAX_ZOOM = 0.08
+
+
+def _parallax_graph(W: int, H: int, F: int, frames: int, seconds: float, grade: str,
+                    rng: random.Random | None = None) -> str:
+    """filter_complex for [0:v] = the looped image and [1:v] = its looped depth map (255 = near) -> [v]."""
+    rng = rng or random
+    bw, bh = int(W * PARALLAX_SCALE) // 2 * 2, int(H * PARALLAX_SCALE) // 2 * 2
+    mw, mh = W // 2 // 2 * 2, H // 2 // 2 * 2                    # displacement is computed at half size
+    sx, sy = rng.choice((-1, 1)), rng.choice((-1, 1))
+    t = f"(2*T/{seconds:.3f}-1)"                                  # -1 .. 1 over the shot
+    z = (f"1+{PARALLAX_ZOOM}*in/{frames}" if rng.random() < 0.6 else f"{1 + PARALLAX_ZOOM}-{PARALLAX_ZOOM}*in/{frames}")
+    return (f"[0:v]scale={bw}:{bh}:force_original_aspect_ratio=increase,crop={bw}:{bh},setsar=1,format=gbrp[img];"
+            f"[1:v]format=gray,scale={mw}:{mh}:force_original_aspect_ratio=increase,crop={mw}:{mh},split[da][db];"
+            f"[da]geq=lum='128+lum(X,Y)/255*{sx * PARALLAX_X}*{t}',scale={bw}:{bh}:flags=bicubic,format=gbrp[dx];"
+            f"[db]geq=lum='128+lum(X,Y)/255*{sy * PARALLAX_Y}*{t}',scale={bw}:{bh}:flags=bicubic,format=gbrp[dy];"
+            f"[img][dx][dy]displace=edge=smear,"
+            f"zoompan=z='{z}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s={W}x{H}:fps={F},"
+            f"setsar=1,format=yuv420p{grade}[v]")
+
+
 def prepare_segment(item: MediaItem, seconds: float, idx: int, settings: Settings, work: Path) -> Path:
     W, H, F = settings.width, settings.height, settings.fps
     out = work / f"seg{idx:02d}.mp4"
@@ -105,6 +149,18 @@ def prepare_segment(item: MediaItem, seconds: float, idx: int, settings: Setting
                     "-vf", f"{cover},fps={F}{grade}", *enc, "-frames:v", str(frames), str(out)],
                    label=f"segment {idx}")
         return out
+
+    depth = item.extra.get("depth") if item.kind == "image" else None
+    wide = bool(item.width and item.height and item.width / item.height > 2.0)
+    if depth and item.path and settings.parallax and settings.ken_burns and not wide and Path(depth).exists():
+        try:
+            ffmpeg.run(["-loop", "1", "-framerate", str(F), "-t", f"{seconds:.3f}", "-i", str(item.path),
+                        "-loop", "1", "-framerate", str(F), "-t", f"{seconds:.3f}", "-i", str(depth),
+                        "-filter_complex", _parallax_graph(W, H, F, frames, seconds, grade),
+                        "-map", "[v]", *enc, "-frames:v", str(frames), str(out)], label=f"segment {idx} (parallax)")
+            return out
+        except ffmpeg.FFmpegError as e:
+            log.warning("Parallax failed for segment %d (%s); plain zoom instead", idx, str(e)[:160])
 
     if item.kind == "image" and item.path:
         vf = _image_vf(item.width, item.height, W, H, F, frames, settings.ken_burns, grade)
@@ -197,8 +253,16 @@ def _measure(path: Path, filters: str) -> float | None:
     return value if value > -70 else None
 
 
+def _bed_gain(settings: Settings, voice: Path, bed_lufs: float) -> float:
+    """Linear gain that puts an ambient bed of loudness ``bed_lufs`` AMBIENCE_BELOW_VOICE dB under this voice."""
+    v = _measure(voice, _voice_filters(settings).lstrip(","))
+    v = -18.0 if v is None else v
+    db = max(-60.0, min(20.0, v - settings.ambience_below_voice - bed_lufs))
+    return 10 ** (db / 20)
+
+
 def mix_audio(settings: Settings, voice: Path, total: float, music: Path | None, work: Path,
-              effects: Path | None = None) -> Path:
+              effects: Path | None = None, ambience=None) -> Path:
     """The finished soundtrack, exactly ``total`` seconds long: the cleaned-up voice with the music ducked under
     it and the sound effects (sfx.track) on top, normalised to LOUDNESS_LUFS in two passes. The first pass
     measures the mix; the second applies one constant gain (loudnorm's linear mode), which hits the target
@@ -208,20 +272,33 @@ def mix_audio(settings: Settings, voice: Path, total: float, music: Path | None,
              f"apad=whole_dur={total:.3f},atrim=0:{total:.3f}[v0]"]
     inputs = ["-i", str(Path(voice).resolve())]
     beds: list[str] = []  # everything mixed under the voice
+    ducked: list[tuple[str, str]] = []   # (label, sidechaincompress options): dips whenever the voice speaks
     k = 1                 # next input index
+    fade_out = max(0.0, total - 1.5)
     if music:
         inputs += ["-stream_loop", "-1", "-i", str(Path(music).resolve())]
-        fade_out = max(0.0, total - 1.5)
         graph.append(f"[{k}:a]aresample=48000,aformat=channel_layouts=stereo,volume={settings.music_volume:.3f},"
                      f"afade=t=in:d=0.8,afade=t=out:st={fade_out:.3f}:d=1.5,atrim=0:{total:.3f}[mus]")
         k += 1
         if settings.music_ducking:  # music dips automatically whenever the voice speaks
-            graph.append("[v0]asplit=2[voice][sc]")
-            graph.append("[mus][sc]sidechaincompress=threshold=0.015:ratio=8:attack=15:release=350:makeup=1[duck]")
-            beds.append("duck")
+            ducked.append(("mus", "threshold=0.015:ratio=8:attack=15:release=350:makeup=1"))
         else:
-            graph.append("[v0]anull[voice]")
             beds.append("mus")
+    if ambience is not None:
+        # the place's ambient bed: AMBIENCE_BELOW_VOICE dB under the voice, dipping further (and slowly coming
+        # back) under every sentence, faded in and out
+        inputs += list(ambience.inputs)
+        gain = _bed_gain(settings, voice, ambience.lufs)
+        pre = f"{ambience.filters}," if ambience.filters else ""
+        graph.append(f"[{k}:a]{pre}aresample=48000,aformat=channel_layouts=stereo,volume={gain:.5f},"
+                     f"afade=t=in:d=1.2,afade=t=out:st={fade_out:.3f}:d=1.5,atrim=0:{total:.3f}[amb]")
+        k += 1
+        ducked.append(("amb", "threshold=0.02:ratio=4:attack=40:release=700:makeup=1"))
+    if ducked:
+        graph.append(f"[v0]asplit={1 + len(ducked)}[voice]" + "".join(f"[sc{i}]" for i in range(len(ducked))))
+        for i, (label, opts) in enumerate(ducked):
+            graph.append(f"[{label}][sc{i}]sidechaincompress={opts}[duck{i}]")
+            beds.append(f"duck{i}")
     else:
         graph.append("[v0]anull[voice]")
     if effects:
@@ -258,7 +335,7 @@ def mix_audio(settings: Settings, voice: Path, total: float, music: Path | None,
 def compose(settings: Settings, segments: list[Path], lengths: list[float], voice: Path, total: float,
             plan: OverlayPlan, out: Path, work: Path, music: Path | None, joins: list[bool] | None = None,
             progress: Callable[[float], None] | None = None, effects: Path | None = None,
-            background: Path | None = None) -> Path:
+            background: Path | None = None, ambience=None) -> Path:
     """``background``: a segment as long as the video, stacked under the footage (split layout); the
     segments are then the top part of the frame."""
     W, H, F = settings.width, settings.height, settings.fps
@@ -270,7 +347,7 @@ def compose(settings: Settings, segments: list[Path], lengths: list[float], voic
     n = len(segments)
     idx = n
     audio_i = idx
-    inputs += ["-i", str(mix_audio(settings, voice, total, music, work, effects).resolve())]
+    inputs += ["-i", str(mix_audio(settings, voice, total, music, work, effects, ambience).resolve())]
     idx += 1
     bg_i = None
     if background:
@@ -300,8 +377,10 @@ def compose(settings: Settings, segments: list[Path], lengths: list[float], voic
         last = labels[0]
     elif T > 0:
         acc, last = glens[0], labels[0]
+        moves = motion_transitions(len(labels) - 1)
         for gi in range(1, len(labels)):
-            tr = random.choice(TRANSITIONS) if settings.transition == "random" else settings.transition
+            tr = (moves[gi - 1] if settings.transition == "motion" else
+                  random.choice(TRANSITIONS) if settings.transition == "random" else settings.transition)
             f.append(f"[{last}][{labels[gi]}]xfade=transition={tr}:duration={T:.3f}:offset={acc - T:.3f}[x{gi}]")
             acc += glens[gi] - T
             last = f"x{gi}"
@@ -405,7 +484,8 @@ SEGMENT_SHARE = 0.3
 def render_video(settings: Settings, media: list[MediaItem], scene_durations: list[float], voice: Path,
                  total: float, plan: OverlayPlan, out: Path, work: Path, joins: list[bool] | None = None,
                  progress: Callable[[float], None] | None = None,
-                 effects: list[tuple[float, str]] | None = None, background: MediaItem | None = None) -> Path:
+                 effects: list[tuple[float, str]] | None = None, background: MediaItem | None = None,
+                 ambience=None) -> Path:
     """``progress`` gets the fraction of the render that is done (0..1), several times a second.
     ``effects`` are (time, sound) pairs for the sound-effects track (see sfx.events_for). ``background``
     (split layout): the footage fills the top half and this video plays under it for the whole Short."""
@@ -436,7 +516,7 @@ def render_video(settings: Settings, media: list[MediaItem], scene_durations: li
             log.info("Sound effects: %d", len(effects))
     return compose(settings, segments, lengths, voice, total, plan, out, work, music, joins,
                    progress=lambda frac: report(SEGMENT_SHARE + (1 - SEGMENT_SHARE) * frac), effects=fx,
-                   background=bg_seg)
+                   background=bg_seg, ambience=ambience)
 
 
 def split_sizes(settings: Settings) -> tuple[tuple[int, int], tuple[int, int]]:
