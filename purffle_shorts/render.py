@@ -356,7 +356,11 @@ def compose(settings: Settings, segments: list[Path], lengths: list[float], voic
 
     f: list[str] = []
     for i in range(n):
-        f.append(f"[{i}:v]settb=AVTB,setpts=PTS-STARTPTS,fps={F},format=yuv420p[s{i}]")
+        # Every segment is made EXACTLY as long as planned (cut, or its last frame held): the transitions are
+        # placed by these lengths, and one segment that came out short once froze the rest of a video.
+        f.append(f"[{i}:v]settb=AVTB,setpts=PTS-STARTPTS,fps={F},format=yuv420p,"
+                 f"tpad=stop_mode=clone:stop_duration={lengths[i]:.3f},trim=duration={lengths[i]:.3f},"
+                 f"setpts=PTS-STARTPTS,fps={F}[s{i}]")      # xfade needs the constant rate declared again
     # Shots of one scene are joined with hard cuts; scenes are joined with transitions.
     groups: list[list[int]] = [[0]]
     for i in range(1, n):
