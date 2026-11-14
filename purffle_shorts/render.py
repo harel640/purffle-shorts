@@ -106,6 +106,16 @@ PARALLAX_Y = 10
 PARALLAX_ZOOM = 0.08
 
 
+def _parallax_source(src: Path, W: int, H: int, dest: Path) -> Path:
+    """``src`` cover-cropped to the parallax working size (PARALLAX_SCALE x the frame), saved once as a JPEG."""
+    from PIL import Image, ImageOps
+    bw, bh = int(W * PARALLAX_SCALE) // 2 * 2, int(H * PARALLAX_SCALE) // 2 * 2
+    with Image.open(src) as im:
+        im = ImageOps.exif_transpose(im).convert("RGB")
+        ImageOps.fit(im, (bw, bh), Image.LANCZOS).save(dest, quality=93)
+    return dest
+
+
 def _parallax_graph(W: int, H: int, F: int, frames: int, seconds: float, grade: str,
                     rng: random.Random | None = None) -> str:
     """filter_complex for [0:v] = the looped image and [1:v] = its looped depth map (255 = near) -> [v]."""
@@ -155,12 +165,21 @@ def prepare_segment(item: MediaItem, seconds: float, idx: int, settings: Setting
     wide = bool(item.width and item.height and item.width / item.height > 2.0)
     if depth and item.path and settings.parallax and settings.ken_burns and not wide and Path(depth).exists():
         try:
-            ffmpeg.run(["-loop", "1", "-framerate", str(F), "-t", f"{seconds:.3f}", "-i", str(item.path),
-                        "-loop", "1", "-framerate", str(F), "-t", f"{seconds:.3f}", "-i", str(depth),
+            # The picture is first scaled ONCE to the working size: looped, ffmpeg decodes it again for every
+            # frame, and a 33-megapixel Commons original made several parallel segments run out of time and
+            # memory and come out SHORT without an error - which froze the video after them (Nov 14).
+            # The length is set by -frames:v alone, and checked afterwards.
+            small = _parallax_source(Path(item.path), W, H, work / f"plx{idx:02d}.jpg")
+            ffmpeg.run(["-loop", "1", "-framerate", str(F), "-i", str(small),
+                        "-loop", "1", "-framerate", str(F), "-i", str(depth),
                         "-filter_complex", _parallax_graph(W, H, F, frames, seconds, grade),
                         "-map", "[v]", *enc, "-frames:v", str(frames), str(out)], label=f"segment {idx} (parallax)")
-            return out
-        except ffmpeg.FFmpegError as e:
+            info = ffmpeg.probe(out)
+            got = info.get("video_duration") or info["duration"]
+            if got + 1.5 / F >= frames / F:
+                return out
+            log.warning("Parallax segment %d came out %.2fs of %.2fs; plain zoom instead", idx, got, frames / F)
+        except Exception as e:  # noqa: BLE001 - any failure here only costs the parallax
             log.warning("Parallax failed for segment %d (%s); plain zoom instead", idx, str(e)[:160])
 
     if item.kind == "image" and item.path:

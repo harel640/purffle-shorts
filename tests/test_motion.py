@@ -88,14 +88,36 @@ def _image(tmp_path, depth=True):
     return item
 
 
-def test_a_picture_with_a_depth_map_gets_parallax(monkeypatch, tmp_path):
+@pytest.fixture
+def made(monkeypatch):
+    """The picture is pre-scaled (stubbed) and each made segment is this many seconds long (default: full)."""
+    state = {"seconds": None}
+    monkeypatch.setattr(R, "_parallax_source", lambda src, W, H, dest: dest)
+    monkeypatch.setattr(FF, "probe", lambda p: {"duration": state["seconds"] or 4.0,
+                                                "video_duration": state["seconds"] or 4.0})
+    return state
+
+
+def test_a_picture_with_a_depth_map_gets_parallax(monkeypatch, tmp_path, made):
+    calls = []
+    monkeypatch.setattr(FF, "run", lambda args, label="", **k: calls.append((label, args)))
+    R.prepare_segment(_image(tmp_path), 4.0, 0, Settings(), tmp_path)
+    assert [c[0] for c in calls] == ["segment 0 (parallax)"]
+    args = calls[0][1]
+    # the PRE-SCALED picture is looped (not the original), and the length comes from -frames:v, not -t
+    assert args[args.index("-i") + 1].endswith("plx00.jpg") and "-t" not in args and "-frames:v" in args
+
+
+def test_a_parallax_segment_that_comes_out_short_is_replaced_by_the_zoom(monkeypatch, tmp_path, made):
+    # Nov 14: segments of 3.4-5 s came out 1.1-1.5 s long without an error, and froze the video after them
     labels = []
     monkeypatch.setattr(FF, "run", lambda args, label="", **k: labels.append(label))
-    R.prepare_segment(_image(tmp_path), 4.0, 0, Settings(), tmp_path)
-    assert labels == ["segment 0 (parallax)"]
+    made["seconds"] = 1.13
+    R.prepare_segment(_image(tmp_path), 3.37, 5, Settings(), tmp_path)
+    assert labels == ["segment 5 (parallax)", "segment 5 (ken burns)"]
 
 
-def test_parallax_failing_falls_back_to_the_zoom(monkeypatch, tmp_path):
+def test_parallax_failing_falls_back_to_the_zoom(monkeypatch, tmp_path, made):
     labels = []
 
     def run(args, label="", **k):
@@ -105,6 +127,14 @@ def test_parallax_failing_falls_back_to_the_zoom(monkeypatch, tmp_path):
     monkeypatch.setattr(FF, "run", run)
     R.prepare_segment(_image(tmp_path), 4.0, 0, Settings(), tmp_path)
     assert labels == ["segment 0 (parallax)", "segment 0 (ken burns)"]
+
+
+def test_the_picture_is_scaled_once_to_the_working_size(tmp_path):
+    from PIL import Image
+    src = tmp_path / "big.jpg"
+    Image.new("RGB", (4000, 2600), "red").save(src)
+    out = R._parallax_source(src, 1080, 1920, tmp_path / "s.jpg")
+    assert Image.open(out).size == (1620, 2880)
 
 
 def test_no_map_or_parallax_off_keeps_the_zoom(monkeypatch, tmp_path):
