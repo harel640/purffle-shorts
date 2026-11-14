@@ -8,6 +8,7 @@ import concurrent.futures
 import logging
 import os
 import random
+import re
 import sys
 from collections.abc import Callable
 from dataclasses import replace
@@ -479,6 +480,38 @@ def compose(settings: Settings, segments: list[Path], lengths: list[float], voic
         ffmpeg.run(args(_encode_args(replace(settings, video_encoder="libx264"), final=True)),
                    label="final render (libx264)", cwd=work, progress=progress, duration=total)
     return out
+
+
+# Post-render check (before any upload). A render once froze on one picture from 5 s to the end while the
+# captions and the voice went on. Captions, emoji, the hook and the progress bar keep changing over a frozen
+# picture, so the freeze is looked for in a band of the frame only footage covers - below the hook and the
+# watermark, above the emoji and the captions.
+FREEZE_MAX_SECONDS = 2.0
+FREEZE_BAND = (0.18, 0.18)       # (top, height) as fractions of the frame
+AV_MAX_GAP = 0.5                 # seconds between the video and the audio stream's durations
+
+
+def render_problems(video: Path) -> list[str]:
+    """Why a finished render must not be published: frozen stretches longer than FREEZE_MAX_SECONDS, or video
+    and audio durations more than AV_MAX_GAP apart. [] when it is fine."""
+    info = ffmpeg.probe(video)
+    problems: list[str] = []
+    vd, ad = info.get("video_duration"), info.get("audio_duration")
+    if vd and ad and abs(vd - ad) > AV_MAX_GAP:
+        problems.append(f"video {vd:.2f}s vs audio {ad:.2f}s")
+    top, height = FREEZE_BAND
+    err = ffmpeg.run(["-i", str(Path(video).resolve()), "-map", "0:v",
+                      "-vf", f"crop=iw:ih*{height}:0:ih*{top},scale=180:-2,"
+                             f"freezedetect=n=-60dB:d={FREEZE_MAX_SECONDS}",
+                      "-f", "null", "-"], label="freeze check", loglevel="info")
+    end = vd or info.get("duration") or 0.0
+    starts = [float(x) for x in re.findall(r"freeze_start:\s*([\d.]+)", err)]
+    ends = [float(x) for x in re.findall(r"freeze_end:\s*([\d.]+)", err)]
+    for i, s0 in enumerate(starts):
+        s1 = ends[i] if i < len(ends) else end              # no end: frozen until the video stops
+        if s1 - s0 > FREEZE_MAX_SECONDS:
+            problems.append(f"frozen {s0:.1f}-{s1:.1f}s")
+    return problems
 
 
 # Share of the render stage spent preparing shots vs. the final pass (measured on 1080x1920 renders).

@@ -182,9 +182,12 @@ def probe(path: str | Path) -> dict:
             data = json.loads(out.stdout or "{}")
             streams = data.get("streams", [])
             v = next((s for s in streams if s.get("codec_type") == "video"), {})
+            a = next((s for s in streams if s.get("codec_type") == "audio"), {})
             dur = data.get("format", {}).get("duration") or v.get("duration") or 0
             return {
                 "duration": float(dur or 0),
+                "video_duration": float(v.get("duration") or 0) or None,
+                "audio_duration": float(a.get("duration") or 0) or None,
                 "width": int(v.get("width") or 0),
                 "height": int(v.get("height") or 0),
                 "has_audio": any(s.get("codec_type") == "audio" for s in streams),
