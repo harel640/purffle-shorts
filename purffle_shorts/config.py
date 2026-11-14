@@ -174,14 +174,16 @@ class Settings:
     video_encoder: str = "libx264"    # libx264|h264_videotoolbox|h264_nvenc|auto
     crf: int = 21
     preset: str = "veryfast"
-    transition: str = "random"        # random|none|fade|slideup|...
-    transition_seconds: float = 0.35
-    max_shot_seconds: float = 4.5     # longer scenes are cut into several shots (0 = one shot per scene)
+    transition: str = "motion"        # motion (whip pans + push-ins)|random|none|fade|slideup|...
+    transition_seconds: float = 0.3
+    max_shot_seconds: float = 5.0     # longer scenes are cut into several shots (0 = one shot per scene)
+    min_shot_seconds: float = 3.0     # ...never into shots shorter than this: a cut every 3-5 s
     clip_jump_cuts: bool = True       # clips: shorten long pauses and cut "um" / "uh"
     clip_max_pause: float = 0.6       # clips: pauses longer than this (seconds) are shortened
     clip_zoom: bool = True            # clips: punch in and out between sentences
     color_grade: str = "vivid"        # none|vivid|cinematic|warm|cool|bw
     ken_burns: bool = True
+    parallax: bool = True             # 2.5D parallax from a depth map (depth.py) when the model is installed
     progress_bar: bool = True
     hook_overlay: bool = True
     watermark: str = ""               # blank = channel name; "none" = off
@@ -202,6 +204,8 @@ class Settings:
     voice_enhance: bool = True        # rumble cut, de-esser and gentle compression on the voice
     sound_effects: bool = True        # whoosh on scene changes, pop per text message, hit under the hook
     sfx_volume: float = 1.0           # 1.0 = 11 dB under the voice; 0.5 is quieter, 2.0 louder
+    ambience: bool = True             # a quiet bed of the place's sound (wind, chimes, water...) under the voice
+    ambience_below_voice: float = 24.0  # dB under the voice, before ducking dips it further while it speaks
 
     # --- YouTube --------------------------------------------------------------------------
     upload: bool = True
@@ -367,11 +371,13 @@ class Settings:
             transition=_env("TRANSITION", d.transition).lower(),
             transition_seconds=max(0.0, _float("TRANSITION_SECONDS", d.transition_seconds)),
             max_shot_seconds=max(0.0, _float("MAX_SHOT_SECONDS", d.max_shot_seconds)),
+            min_shot_seconds=max(0.5, _float("MIN_SHOT_SECONDS", d.min_shot_seconds)),
             clip_jump_cuts=_bool(_env("CLIP_JUMP_CUTS", "true")),
             clip_max_pause=max(0.2, _float("CLIP_MAX_PAUSE", d.clip_max_pause)),
             clip_zoom=_bool(_env("CLIP_ZOOM", "true")),
             color_grade=_env("COLOR_GRADE", d.color_grade).lower(),
             ken_burns=_bool(_env("KEN_BURNS", "true")),
+            parallax=_bool(_env("PARALLAX", "true")),
             progress_bar=_bool(_env("PROGRESS_BAR", "true")),
             hook_overlay=_bool(_env("HOOK_OVERLAY", "true")),
             watermark=_env("WATERMARK"),
@@ -392,6 +398,8 @@ class Settings:
             voice_enhance=_bool(_env("VOICE_ENHANCE", "true")),
             sound_effects=_bool(_env("SOUND_EFFECTS", "true")),
             sfx_volume=max(0.0, _float("SFX_VOLUME", d.sfx_volume)),
+            ambience=_bool(_env("AMBIENCE", "true")),
+            ambience_below_voice=_float("AMBIENCE_BELOW_VOICE", d.ambience_below_voice),
             upload=_bool(_env("UPLOAD", "true")),
             privacy=_env("YT_PRIVACY", d.privacy).lower(),
             publish_times=_list(_env("PUBLISH_TIMES")),

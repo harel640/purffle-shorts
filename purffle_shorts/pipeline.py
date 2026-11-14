@@ -20,7 +20,7 @@ from pathlib import Path
 
 import requests
 
-from . import analytics, crosspost, ffmpeg, notify, seo, sfx, topics, tts, youtube
+from . import ambience, analytics, crosspost, depth, ffmpeg, notify, seo, sfx, topics, tts, youtube
 from .config import Settings
 # Place de-duplication lives in history.py (no heavy imports) so other tools can apply the same rule.
 from .history import PLACE_REUSE_DAYS, History, now_iso, place_recently_used  # noqa: F401 (re-exported)
@@ -944,7 +944,8 @@ class Studio:
                     timeline = scene_timeline([sc.narration for sc in script.scenes], speech.words, total,
                                               s.language, min_len=1.2)
             # A chat story's picture is mostly the phone screen: more cuts behind it would only cost time.
-            shots = split_shots(timeline, speech.words, 0 if chat else s.max_shot_seconds)
+            shots = split_shots(timeline, speech.words, 0 if chat else s.max_shot_seconds,
+                                min_len=min(s.min_shot_seconds, s.max_shot_seconds / 2) if s.max_shot_seconds else 1.6)
             joins = [a.index == b.index for a, b in zip(shots, shots[1:])]
             T = s.transition_seconds if s.transition != "none" else 0.0
             background = background_item(s, total)
@@ -1032,8 +1033,25 @@ class Studio:
             effects = sfx.events_for(scene_starts=[st.start for st, j in zip(shots[1:], joins) if not j],
                                      message_starts=speech.line_starts if messages else None,
                                      hook=bool(plan.hook_until or plan.card_until))
+            if s.parallax and s.ken_burns and not chat:
+                # 2.5D parallax: a depth map per picture (depth.py); a picture without one keeps the plain zoom
+                stills = list(dict.fromkeys(m.path for m in media
+                                            if m is not None and m.kind == "image" and m.path))
+                maps = depth.maps_for(stills, work / "depth")
+                for m in media:
+                    if m is not None and m.path in maps:
+                        m.extra["depth"] = str(maps[m.path])
+                if stills:
+                    log.info("Parallax: depth for %d of %d picture(s)%s", len(maps), len(stills),
+                             "" if depth.available() else " (no depth model installed)")
+            bed = None
+            if s.ambience and script.style in STORY_STYLES:
+                bed = ambience.for_place(total, place or pick.subject, (pick.source_text or "")[:1500],
+                                         script.narration)
+                log.info("Ambience: %s", bed.name)
             render_video(s, media, [st.duration for st in shots], speech.audio, total, plan, video, work, joins,
-                         progress=self._sub, effects=effects, background=background if split else None)
+                         progress=self._sub, effects=effects, background=background if split else None,
+                         ambience=bed)
 
             self._step("check")
             info = ffmpeg.probe(video)
