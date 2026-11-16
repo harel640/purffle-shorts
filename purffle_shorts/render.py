@@ -104,6 +104,7 @@ PARALLAX_SCALE = 1.5
 PARALLAX_X = 36
 PARALLAX_Y = 10
 PARALLAX_ZOOM = 0.08
+PARALLAX_WORKERS = 3        # parallax segments made at the same time (memory, see render_video)
 
 
 def _parallax_source(src: Path, W: int, H: int, dest: Path) -> Path:
@@ -552,6 +553,10 @@ def render_video(settings: Settings, media: list[MediaItem], scene_durations: li
     if background is not None:
         top = replace(settings, resolution=split_sizes(settings)[0])
     workers = max(1, min(8, max(2, (os.cpu_count() or 4) // 3), len(media)))  # each ffmpeg is multithreaded
+    if settings.parallax and any(m is not None and m.extra.get("depth") for m in media):
+        # A parallax ffmpeg holds several full-size planes per frame: 6 at once ran the container out of memory
+        # (San Agustin, Nov 15: one failed with ENOMEM, four came out short and fell back to the plain zoom).
+        workers = min(workers, PARALLAX_WORKERS)
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
         futs = [ex.submit(prepare_segment, m, L, i, top, work) for i, (m, L) in enumerate(zip(media, lengths))]
         bg_fut = None

@@ -57,18 +57,29 @@ def test_the_list_skips_a_country_made_too_recently_without_claiming_it(tmp_path
 
 # ------------------------------------------------------------------ 3. concrete stakes
 @pytest.mark.parametrize("text", [
-    "What secret kept the sky-bridge hidden?", "Spiti's secret 10th-century shrine",
-    "Why does Gokarna's Shiva temple stand untouched for centuries", "Echoes today", "Vanished overnight?",
-    "Why is a Sri Lankan plain called Horton?"])
-def test_vague_hooks_are_caught(text):
-    assert vague_hook_reason(text)
-
-
-@pytest.mark.parametrize("text", [
-    "One of history's richest cities vanished in months", "A 1,600-year-old temple survived three invasions",
-    "The village that survived 400 winters", "How did 300 masons carve this in 12 years?"])
-def test_concrete_hooks_pass(text):
+    # Week 2: the best titles ever were curiosity questions with human stakes
+    "How did one of history's richest cities vanish in months?", "How did one villager's roof survive massive snow?",
+    "Why did a whole city build its houses on water?", "Only one church survived the quake that flattened Manila"])
+def test_curiosity_headlines_pass(text):
     assert vague_hook_reason(text) == ""
+
+
+@pytest.mark.parametrize("text, why", [
+    ("VIGAN: Juan de Salcedo Founded City 1572", "a year"),           # week 2: 50-150 views
+    ("KOTA KUALA: 1786 future Adelaide planner born", "a year"),
+    ("PATTADAKAL: Temples that unite two styles", "'PLACE: fact'"),
+    ("Church survived 1863 quake", "a year"),
+    ("Juan de Salcedo founded the city", "birth, founding"),
+    ("A temple with eight towers", "not a curiosity question"),
+    ("How tall is the tower?", "no human stakes"),
+])
+def test_dry_or_dated_headlines_are_caught(text, why):
+    assert why in vague_hook_reason(text)
+
+
+def test_the_opening_may_name_a_year_but_must_still_hook():
+    assert vague_hook_reason("In 1565 one of history's richest cities vanished in months?", "opening") == ""
+    assert "year" in vague_hook_reason("In 1565 one of history's richest cities vanished in months?", "title")
 
 
 def _story(title="What secret kept the stone city hidden?", hook="A HIDDEN MYSTERY",
@@ -83,31 +94,32 @@ class _HookLLM:
 
     def complete_json(self, system, user, schema=None, **k):
         self.calls += 1
-        assert "CONCRETE STAKES" in user and "1565" in user                 # rewritten from the script's facts
+        assert "CURIOSITY QUESTION" in user and "NO years" in user and "1565" in user   # from the script's facts
         return self.reply
 
 
-def test_a_vague_hook_is_rewritten_once_with_concrete_stakes():
-    llm = _HookLLM({"title": "One of history's richest cities fell in months", "hook_text": "SACKED IN 1565",
-                    "opening": "In 1565, one of the richest cities on Earth was sacked in months."})
+def test_a_weak_hook_is_rewritten_once_as_a_curiosity_question():
+    llm = _HookLLM({"title": "How did one of history's richest cities vanish in months?",
+                    "hook_text": "Sacked in months?",
+                    "opening": "How did one of the richest cities on Earth fall in months?"})
     s = ensure_concrete_hook(llm, _story(), place_title=True)
-    assert llm.calls == 1 and s.title.startswith("One of history's richest")
-    assert s.hook_text == "SACKED IN 1565" and "1565" in s.scenes[0].narration
+    assert llm.calls == 1 and s.title.startswith("How did one of history's richest")
+    assert s.hook_text == "Sacked in months?" and s.scenes[0].narration.startswith("How did")
 
 
-def test_a_rewrite_that_is_still_vague_keeps_the_original_and_logs(caplog):
-    llm = _HookLLM({"title": "The hidden mystery", "hook_text": "SECRET CITY", "opening": "What secret?"})
+def test_a_rewrite_with_a_year_or_still_vague_keeps_the_original_and_logs(caplog):
+    llm = _HookLLM({"title": "Sacked in 1565", "hook_text": "SECRET CITY", "opening": "What secret?"})
     with caplog.at_level("WARNING", logger="purffle"):
         s = ensure_concrete_hook(llm, _story())
     assert llm.calls == 1 and s.title == "What secret kept the stone city hidden?"
-    assert any("still vague" in r.getMessage() for r in caplog.records)
+    assert any("still falls short" in r.getMessage() for r in caplog.records)
 
 
-def test_concrete_hooks_and_non_story_formats_are_left_alone():
+def test_good_headlines_and_non_story_formats_are_left_alone():
     llm = _HookLLM({})
-    concrete = _story(title="One of the richest cities fell in 1565", hook="SACKED IN 1565",
-                      opening="In 1565 one of the richest cities on Earth fell in months.")
-    assert ensure_concrete_hook(llm, concrete) is concrete and llm.calls == 0
+    good = _story(title="How did one of history's richest cities vanish in months?", hook="Gone in months?",
+                  opening="How did one of the richest cities on Earth fall in months?")
+    assert ensure_concrete_hook(llm, good) is good and llm.calls == 0
     ensure_concrete_hook(llm, _story(style="facts"))
     assert llm.calls == 0
 
