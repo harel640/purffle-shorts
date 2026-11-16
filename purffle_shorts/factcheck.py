@@ -23,6 +23,7 @@ import math
 import os
 import re
 import unicodedata
+from dataclasses import replace
 from difflib import SequenceMatcher
 
 from .utils import clean_narration, emphasis_key, redact
@@ -198,8 +199,9 @@ CLAIMS_SCHEMA = {
         "required": ["id", "verdict", "quote", "unsupported_part"]}}},
     "required": ["items"]}
 HEADLINE_SCHEMA = {"type": "object", "additionalProperties": False,
-                   "properties": {"title": {"type": "string"}, "hook_text": {"type": "string"}},
-                   "required": ["title", "hook_text"]}
+                   "properties": {"title": {"type": "string"}, "hook_text": {"type": "string"},
+                                  "opening": {"type": "string"}},
+                   "required": ["title", "hook_text", "opening"]}
 
 CLAIMS_SYSTEM = ("You are a strict fact-checker. You compare sentences with a SOURCE text and reply only with "
                  "strict JSON. You never use your own knowledge: only what the SOURCE states counts.")
@@ -562,15 +564,17 @@ def _judge(item: dict, reply: dict | None, source_norm: str, source_digits: str,
 
 def _rewrite_headline(llm, script, quotes: list[str], which: list[str], title_len: int) -> dict:
     """ONE rewrite of an unsupported title / on-screen hook from the supported quotes only."""
+    names = {"hook": "on-screen hook_text", "opening": "spoken opening line"}
     user = (
-        "The " + " and the ".join("on-screen hook_text" if w == "hook" else w for w in which) + " of this "
+        "The " + " and the ".join(names.get(w, w) for w in which) + " of this "
         "YouTube Short state something the source article does not. Rewrite each as a CURIOSITY QUESTION or a "
         "SURPRISING CONTRAST with human stakes (people, and what they survived, lost, risked or uncovered) whose "
         "every premise is stated by the QUOTES below. NO years or dates. Never \"PLACE: fact\"; the place's name "
         "may appear naturally. Never vague mystery words (mystery, secret, hidden, legend, forgotten, untold). "
         "Do NOT add any fact that is not in the quotes. "
-        f"title: max {title_len} characters, no hashtags, no quotes. hook_text: max 6 words. "
-        "Return both, unchanged if one of them was not named above.\n\n"
+        f"title: max {title_len} characters, no hashtags, no quotes. hook_text: max 6 words. opening: one spoken "
+        "sentence of 8-14 words (a year is allowed there). Return all three, unchanged (opening: \"\") if it was "
+        "not named above.\n\n"
         f"Current title: {script.title}\nCurrent hook_text: {script.hook_text}\n\nQUOTES from the source:\n"
         + "\n".join(f"- {q}" for q in quotes[:14]))
     d = llm.complete_json("You are a careful YouTube Shorts editor. Reply with strict JSON.", user,
@@ -670,6 +674,12 @@ def verify_claims(llm, script, source_text: str, *, place_words: str = "",
 
     by_kind = {k: [r for r in rows if r["kind"] == k] for k in ("title", "hook", "description", "narration")}
 
+    # The opening line is the spoken hook: if it goes, it gets the same one rewrite as the title (below).
+    opening_bad = any(r.get("role") == "OPENING" and r["verdict"] == "unsupported" for r in by_kind["narration"])
+    first_scene = script.scenes[0] if script.scenes else None
+    first_scene_alone = bool(first_scene) and len(
+        [s for s in _SENT_SPLIT.split((first_scene.narration or "").strip()) if s.strip()]) == 1
+
     # -- narration: drop every unsupported sentence
     bad = {(r["scene"], r["pos"]) for r in by_kind["narration"] if r["verdict"] == "unsupported"}
     if bad:
@@ -698,29 +708,48 @@ def verify_claims(llm, script, source_text: str, *, place_words: str = "",
 
     # -- title / hook: one rewrite from the supported quotes, then checked again
     which = [k for k in ("title", "hook") if any(r["verdict"] == "unsupported" for r in by_kind[k])]
-    if which:
+    asked = which + (["opening"] if opening_bad and "narration" in kinds and first_scene is not None else [])
+    if asked:
         quotes = list(dict.fromkeys(r["quote"] for r in rows if r["verdict"] == "supported" and r["quote"]))
         fixed = False
         if not quotes:
             log.info("Claim check: nothing in the story is supported, so the %s cannot be rewritten",
-                     " and ".join(which))
+                     " and ".join(asked))
         if quotes:
             try:
-                new = _rewrite_headline(llm, script, quotes, which, title_len)
+                new = _rewrite_headline(llm, script, quotes, asked, title_len)
             except Exception as e:  # noqa: BLE001
                 log.warning("Claim check: title/hook rewrite failed (%s)", redact(e))
                 new = {}
-            cand = {"title": _tidy(str(new.get("title", "")), 60), "hook": _tidy(str(new.get("hook_text", "")), 48)}
-            if all(cand[k] for k in which):
-                again = [{"id": i, "kind": k, "text": cand[k]} for i, k in enumerate(which)]
-                rechecked = judge(again)
-                if all(r["verdict"] != "unsupported" for r in rechecked):
-                    for r in rechecked:
-                        setattr(script, "title" if r["kind"] == "title" else "hook_text", r["text"])
-                        r["id"], r["rewritten"] = len(rows), True
-                        rows.append(r)
-                    fixed = True
-        if not fixed:
+            cand = {"title": _tidy(str(new.get("title", "")), 60), "hook": _tidy(str(new.get("hook_text", "")), 48),
+                    "opening": clean_narration(str(new.get("opening", "")).strip())}
+            role = {"title": "TITLE", "hook": "HOOK", "opening": "OPENING"}
+            again = [{"id": i, "kind": "narration" if k == "opening" else k, "text": cand[k], "role": role[k]}
+                     for i, k in enumerate(asked) if cand[k]]
+            rechecked = judge(again) if again else []
+            ok = {r["role"]: r for r in rechecked if r["verdict"] != "unsupported"}
+            if all(role[k] in ok for k in which):
+                for k in which:
+                    r = ok[role[k]]
+                    setattr(script, "title" if k == "title" else "hook_text", r["text"])
+                    r["id"], r["rewritten"] = len(rows), True
+                    rows.append(r)
+                fixed = True
+            if "opening" in asked:
+                r = ok.get("OPENING")
+                if r is not None:
+                    # put the supported opening back in front, in the first scene's picture slot
+                    if script.scenes and script.scenes[0] is first_scene and not first_scene_alone:
+                        first_scene.narration = clean_narration(f"{r['text']} {first_scene.narration}")
+                    else:
+                        script.scenes.insert(0, replace(first_scene, narration=r["text"], emphasis=[], emoji=""))
+                    r["id"], r["rewritten"] = len(rows), True
+                    rows.append(r)
+                    log.info("Claim check: opening rewritten from the source: %s", r["text"])
+                else:
+                    log.warning("Claim check: no supported opening question; the video starts with its next line")
+            fixed = fixed or not which
+        if which and not fixed:
             what = " and ".join("on-screen hook" if k == "hook" else k for k in which)
             if strict:
                 raise NothingSupported(f"the {what} could not be supported by the source", report())
