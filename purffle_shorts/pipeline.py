@@ -39,7 +39,9 @@ from .script import (
     STORY_STYLES,
     STYLES,
     Script,
+    YEAR_RE,
     ensure_concrete_hook,
+    ensure_one_event,
     fit_story_length,
     load_script,
     recent_violence_reason,
@@ -231,7 +233,7 @@ def plan_ai_scenes(historical: list[bool]) -> list[bool]:
     return hist
 
 
-TITLE_MAX = 59           # a place Short's whole title, " #shorts" included, stays under 60 characters
+TITLE_MAX = 68           # a place Short's whole title: a headline of up to 60 characters + " #shorts"
 # Generic trailing words dropped from a place name for the title ("Gunung Mulu National Park" -> "GUNUNG MULU").
 _LABEL_DROP = {"national", "park", "parks", "wildlife", "nature", "reserve", "sanctuary", "protected", "area",
                "scenic", "district", "county", "province", "prefecture", "region", "complex", "site",
@@ -247,24 +249,32 @@ def place_label(place: str) -> str:
 
 
 def place_title(text: str, place: str, fallback: str = "") -> str:
-    """'HAMPI: The Richest City That Vanished #shorts' - the place name first, then the hook, under 60
-    characters in all. A place name the writer put in front anyway is not repeated. A hook too long to fit
-    gives way to ``fallback`` (the short on-screen hook) rather than being cut off mid-sentence."""
-    label = place_label(place)
-    budget = TITLE_MAX - len(" #shorts") - len(label) - len(": ")
+    """'How did one of history's richest cities vanish in months? #shorts' - the curiosity headline itself.
+    Week 2: the old 'HAMPI: <fact>' label format read as a dry date statement and lost views, so no label is
+    put in front any more (a 'PLACE: ' the writer added anyway is taken off; the name may stay where it reads
+    naturally). A year that got through is never published: the on-screen hook stands in, or the year is cut.
+    A headline too long to fit gives way to ``fallback`` (the short hook) rather than being cut mid-sentence."""
+    budget = TITLE_MAX - len(" #shorts")
 
     def clean(h: str) -> str:
         h = (h or "").strip().strip("\"'")
-        for name in dict.fromkeys([label, re.split(r"[,(]", place or "")[0].strip()]):
-            if name and h.lower().startswith(name.lower()):
-                h = h[len(name):].lstrip(" :;,-–—")
+        h = re.sub(r"^\s*[A-Z][A-Z0-9'’ .&-]{2,}:\s*", "", h)                  # a 'PLACE: ' label
         return h[:1].upper() + h[1:]
 
     hook, alt = clean(text), clean(fallback)
-    if len(hook) > budget and alt and len(alt) <= budget:
+    if YEAR_RE.search(hook):
+        hook = alt if alt and not YEAR_RE.search(alt) else strip_years(hook)
+    if len(hook) > budget and alt and len(alt) <= budget and not YEAR_RE.search(alt):
         hook = alt
     hook = truncate_words(hook, budget) if budget >= 10 else ""
-    return f"{label}: {hook} #shorts" if hook else f"{label} #shorts"
+    return f"{hook} #shorts" if hook else f"{place_label(place).title()} #shorts"
+
+
+def strip_years(text: str) -> str:
+    """``text`` without its years ('Church survived 1863 quake' -> 'Church survived quake')."""
+    t = re.sub(r"\s*\b(?:in|from|since|by|of|around)\s+(?=" + YEAR_RE.pattern + ")", " ", text, flags=re.I)
+    t = YEAR_RE.sub("", t)
+    return re.sub(r"\s{2,}", " ", re.sub(r"\s+([?.!,;:])", r"\1", t)).strip(" ,;:-")
 
 
 def _hashtag(text: str) -> str:
@@ -758,10 +768,11 @@ class Studio:
                 # A story's title, on-screen hook and opening line must state concrete stakes, not a vague
                 # mystery (week-1 analytics); one rewrite if they don't.
                 script = ensure_concrete_hook(self.llm, script, place_title=place_locked_channel)
+                script = ensure_one_event(self.llm, script)        # one event, not a list of years
             if claim_checked:
                 # LAST, after every rewrite: each sentence, the title and the hook must be supported by a
                 # passage of the article. Unsupported sentences are removed; fail closed.
-                script = self._claim_check(script, pick, title_len=40 if place_locked_channel else 60)
+                script = self._claim_check(script, pick, title_len=60)
             if script.style in STORY_STYLES:
                 why = recent_violence_reason(script, pick.source_full or pick.source_text)   # no recent tragedies
                 if why:

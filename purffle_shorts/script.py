@@ -247,7 +247,17 @@ STORY_SHAPE_RULE = (
     "- Never encyclopedia phrasing: no \"the site contains\", \"comprises\", \"consists of\", \"is located\", "
     "\"is known for\", \"is home to\", \"features\", \"spanning\", \"overall\", \"notable\", \"a total of\". "
     "Say what happened, to whom, and when.\n"
+    "- The TURNING POINT is an EVENT that happened to people - an attack, a fall, a survival, a discovery, a "
+    "loss - never a birth, a founding date or an administrative fact (\"the planner was born here\" is not a "
+    "story). Tell ONE event: name at most TWO years in the whole narration and never a list of years (not "
+    "\"earthquakes in 1645, 1699, 1754 and 1796\" but \"earthquake after earthquake\").\n"
     "- At least 6 scenes of one or two short sentences each.\n")
+# Week 2: the spoken opening, like the title, is a curiosity question or a contrast (see STAKES_RULE).
+HOOK_LINE_RULE = (
+    "- Scene 1 narration opens with a CURIOSITY QUESTION or a SURPRISING CONTRAST in one line (8-14 words, no "
+    "greeting) with human stakes from the background - people, and what they survived, lost, risked or "
+    "uncovered (\"How did one of history's richest cities vanish in months?\"). No year in it; never a birth, "
+    "a founding date or an administrative fact.\n")
 _ENCYCLOPEDIA_RE = re.compile(
     r"\b(the (?:site|complex|area|park|temple|caves?|monastery|fort|city|town|island) (?:contains?|comprises|"
     r"consists of|features|includes)|comprises|consists of|is (?:located|situated)|is known for|is home to|"
@@ -262,15 +272,10 @@ def encyclopedia_phrases(text: str) -> list[str]:
 def _format_rules(style: str) -> str:
     if style == "history":
         return ("- speaker is always \"A\": one calm, cinematic narrator.\n"
-                "- Scene 1 narration states the story's CONCRETE STAKES in one line (8-14 words, no greeting): "
-                "who or what, and what was won or lost, with a number, date or superlative - a statement, not a "
-                "vague question (\"One of history's richest cities vanished in months.\").\n"
-                + STORY_SHAPE_RULE)
+                + HOOK_LINE_RULE + STORY_SHAPE_RULE)
     if style == "place":
         return ("- speaker is always \"A\": one calm, cinematic narrator.\n"
-                "- Scene 1 narration states the story's CONCRETE STAKES in one line (8-14 words, no greeting): "
-                "who or what, and what was won or lost, with a number, date or superlative - a statement, not a "
-                "vague question (\"One of history's richest cities vanished in months.\").\n"
+                + HOOK_LINE_RULE +
                 "- Reveal what makes THIS place special TODAY: its setting and landscape, how it looks and "
                 "feels, the life and culture around it, and any local legend (say \"legend says\"). Do NOT "
                 "narrate dated historical events, rulers, battles, dynasties or founding dates — describe the "
@@ -341,16 +346,17 @@ def build_prompt(subject: str, style: str, settings: Settings, avoid: list[str],
             "\"octopus underwater\", \"old library books\"). No abstract words.\n"
             "- image_prompt: one vivid English sentence for an AI image of that scene, no text or letters in the image.\n"
             "- historical: always false for this format.\n")
-    title_rule = ("- title: the HOOK only, max 40 characters, curiosity-driven but honest — do NOT include the place "
-                  "name (it is put in front: \"HAMPI: The Richest City That Vanished\"). No hashtags, no quotes."
+    title_rule = ("- title: max 60 characters, a curiosity question or contrast; the place's name may appear "
+                  "naturally but never as a \"PLACE: fact\" label. No hashtags, no quotes."
                   if place_title else
                   "- title: max 60 characters, curiosity-driven but honest, no hashtags, no quotes.")
     if story:
         title_rule += ("\n" + STAKES_RULE)
-    hook_rule = ("one sentence stating the same concrete stakes as the title (who or what, and what was won or "
-                 "lost), with a number, date or superlative from the background." if story else
+    hook_rule = ("a curiosity question or surprising contrast with the same human stakes as the title (who "
+                 "survived, lost, risked or uncovered what), from the background, with no year in it." if story else
                  "a bold claim or question that stops the scroll in under 2 seconds.")
-    hook_text_rule = (": concrete (a number, a name or a superlative), never a vague mystery phrase" if story else "")
+    hook_text_rule = (": a short curiosity question or contrast with human stakes, no year, never a vague "
+                      "mystery phrase" if story else "")
     description_rule = ("- description: ONE sentence summarising the video that names the place and its country. "
                         "No hashtags." if place_title else
                         "- description: 2-3 sentences plus one question that invites comments. No hashtags.")
@@ -652,33 +658,69 @@ def _resize_story(llm, script: Script, subject: str, lo_words: int, hi_words: in
     return out
 
 
-# ---------------------------------------------------------------------------------- concrete stakes (#3)
-# Week-1: titles with concrete stakes held viewers ("one of history's richest cities vanished in months");
-# vague mystery words did not ("mystery?", "echoes today", "vanished overnight?").
-STAKES_RULE = ("  It must state CONCRETE STAKES from the story - who or what, and what was won or lost, with a "
-               "number, date or superlative TAKEN FROM THE BACKGROUND (e.g. \"One of history's richest cities "
-               "vanished in months\"). If the background gives none, state the stakes without one - never make "
-               "one up: the title is checked against the background and an unsupported one is rejected. Never "
-               "vague mystery words: mystery, secret, hidden, echoes, whispers, untold, forgotten, legend, "
-               "\"vanished overnight?\", \"what happened?\".")
+# ---------------------------------------------------------------------------------- curiosity headlines (#3, week 2)
+# Week 1: concrete stakes beat vague mystery words. Week 2: dry date statements ("VIGAN: Juan de Salcedo Founded
+# City 1572") got 50-150 views while the best titles ever were curiosity QUESTIONS with human stakes - "How did
+# one of history's richest cities vanish in months?" (1.1K), "How did one villager's roof survive massive
+# snow?" (454). So the title, the on-screen hook and the spoken opening are a curiosity question or a
+# surprising contrast about people - who survived, lost, risked or uncovered what - with no years and no
+# "PLACE: fact" label. Everything they take for granted is still checked against the article (factcheck).
+STAKES_RULE = (
+    "  It must be a CURIOSITY QUESTION or a SURPRISING CONTRAST with HUMAN STAKES taken from the background: "
+    "people, and what they survived, lost, risked, hid or uncovered (e.g. \"How did one of history's richest "
+    "cities vanish in months?\", \"How did one villager's roof survive massive snow?\", \"Why did a whole "
+    "city build its houses on water?\"). NO years or dates in it (no \"1572\", no \"7th-century\"). Never the "
+    "\"PLACE: fact\" format; the place's name may appear naturally. Never a birth, a founding date or an "
+    "administrative fact as the hook. Whatever the question takes for granted must be stated by the "
+    "background: it is checked, and an unsupported one is rejected. Never vague filler words: mystery, secret, "
+    "hidden, echoes, whispers, untold, forgotten, legend, \"what happened?\".")
 _VAGUE_RE = re.compile(r"\b(myster(?:y|ies|ious)|secrets?|secretly|hidden|echo(?:es|ing)?|whisper\w*|untold|"
                        r"unknown|enigma\w*|legend(?:s|ary)?|forgotten|lost to time|you won'?t believe|"
                        r"what happened|vanished overnight|stand(?:s)? untouched|truth about)\b", re.I)
 _CONCRETE_RE = re.compile(r"\d|\b(one|two|three|four|five|six|seven|eight|nine|ten|twelve|hundred|thousand|"
                           r"million|dozens?|centur(?:y|ies)|richest|largest|biggest|oldest|first|last|only|"
                           r"tallest|longest|deepest|highest|greatest|fastest|months?|weeks?|days?|years?)\b", re.I)
+# A year or dated period: "1572", "366 CE", "AD 800", "7th-century", "the 1860s"
+YEAR_RE = re.compile(r"\b(?:1\d{3}|20\d{2}|[1-9]\d{0,2}\s*(?:CE|BCE|AD|BC))s?\b|\bAD\s*\d{1,4}\b|"
+                     r"\b\d{1,2}(?:st|nd|rd|th)[\s‑-]*centur(?:y|ies)\b", re.I)
+_LABEL_RE = re.compile(r"^\s*[A-Z][A-Z0-9'’ .&-]{2,}:\s")          # "VIGAN: ..." / "KOTA KUALA: ..."
+_CONTRAST_RE = re.compile(r"\b(but|yet|while|only|still|even|instead|never|without|outlived|outlasted|against|"
+                          r"despite|whole|every)\b", re.I)
+_STAKES_RE = re.compile(
+    r"\b(surviv\w*|vanish\w*|disappear\w*|lost|lose|loses|fell|fall|fallen|sacked|burn\w*|destroy\w*|ruin\w*|"
+    r"abandon\w*|fled|flee\w*|escap\w*|hid|hide|hiding|buried|sealed|uncover\w*|discover\w*|found|saved|rescu\w*|"
+    r"risk\w*|stol\w*|carried off|died|die|kill\w*|conquer\w*|besieg\w*|invad\w*|attack\w*|defend\w*|built|"
+    r"carv\w*|dug|walled|guard\w*|swallow\w*|drown\w*|flood\w*|quake|earthquake|storm|fire|richest|people|"
+    r"build|homes?|houses?|lived|gone|left|stood|stand|stands|"
+    r"villagers?|monks?|priests?|kings?|queens?|emperors?|sultans?|soldiers?|traders?|families|who|whose)\b",
+    re.I)
+_DRY_RE = re.compile(r"\b(was born|born|founded|founding|established|became (?:the )?(?:capital|district|"
+                     r"municipality|seat)|administrative|incorporated|gazetted|declared a)\b", re.I)
 
 
-def vague_hook_reason(text: str) -> str:
-    """Why a title or hook is vague rather than stating concrete stakes, or ""."""
+def vague_hook_reason(text: str, kind: str = "title") -> str:
+    """Why a title, on-screen hook or spoken opening falls short of a curiosity headline, or "".
+    ``kind``: "title" | "hook_text" | "opening" - years and the "PLACE: fact" label are banned from the title
+    and the hook; all three must ask a question or set up a contrast, with human stakes."""
     text = (text or "").strip()
     if not text:
         return ""
     m = _VAGUE_RE.search(text)
     if m:
         return f"vague word {m.group(0)!r}"
-    if text.endswith("?") and not _CONCRETE_RE.search(text):
-        return "a question with no concrete stakes (no number, date or superlative)"
+    if kind in ("title", "hook_text"):
+        y = YEAR_RE.search(text)
+        if y:
+            return f"a year in it ({y.group(0)!r})"
+        if _LABEL_RE.search(text):
+            return "the 'PLACE: fact' format"
+    d = _DRY_RE.search(text)
+    if d:
+        return f"a birth, founding or administrative fact ({d.group(0)!r}) is not a story"
+    if not (text.rstrip().endswith("?") or _CONTRAST_RE.search(text)):
+        return "not a curiosity question or a contrast"
+    if not _STAKES_RE.search(text):
+        return "no human stakes (who survived, lost, risked or uncovered what)"
     return ""
 
 
@@ -694,27 +736,28 @@ def _numbers(text: str) -> set[str]:
 
 
 def ensure_concrete_hook(llm, script: Script, place_title: bool = False) -> Script:
-    """A story script's title, on-screen hook and spoken opening must state concrete stakes. If any of them is
-    vague, ONE rewrite of the three from the script's own facts; a part that is still vague is kept as the
-    better of the two and logged (the length and safety gates decide whether the video is made)."""
+    """A story script's title, on-screen hook and spoken opening must be curiosity questions or contrasts with
+    human stakes (vague_hook_reason). If any falls short, ONE rewrite of the three from the script's own facts;
+    a part that still falls short is kept as the better of the two and logged."""
     if script.style not in STORY_STYLES or not script.scenes:
         return script
     parts = {"title": script.title, "hook_text": script.hook_text, "opening": script.scenes[0].narration}
-    vague = {k: vague_hook_reason(v) for k, v in parts.items()}
-    if not any(vague.values()) or llm is None:
+    weak = {k: vague_hook_reason(v, k) for k, v in parts.items()}
+    if not any(weak.values()) or llm is None:
         return script
-    log.info("Hook is vague (%s); rewriting it once with concrete stakes",
-             "; ".join(f"{k}: {v}" for k, v in vague.items() if v))
-    title_len = 40 if place_title else 60
+    log.info("Hook falls short (%s); rewriting it once as a curiosity question",
+             "; ".join(f"{k}: {v}" for k, v in weak.items() if v))
     user = (
-        "Rewrite the title, on-screen hook_text and spoken opening of this YouTube Short so each states "
-        "CONCRETE STAKES taken from the narration below - who or what, and what was won or lost, with a "
-        "number, date or superlative it states (e.g. \"One of history's richest cities vanished in months\"); "
-        "if the narration states none, give the stakes without one. "
-        "Never vague mystery words: mystery, secret, hidden, echoes, whispers, untold, forgotten, legend, "
-        "unknown, \"vanished overnight\", \"what happened\". Do NOT invent facts. "
-        f"title: max {title_len} characters" + (", without the place name" if place_title else "") + ". "
-        "hook_text: max 6 words. opening: one sentence that replaces the first line of the narration.\n\n"
+        "Rewrite the title, on-screen hook_text and spoken opening of this YouTube Short. Each must be a "
+        "CURIOSITY QUESTION or a SURPRISING CONTRAST with HUMAN STAKES taken from the narration below - people, "
+        "and what they survived, lost, risked, hid or uncovered (e.g. \"How did one of history's richest cities "
+        "vanish in months?\", \"How did one villager's roof survive massive snow?\"). NO years or dates in the "
+        "title or the hook_text. Never \"PLACE: fact\"; the place's name may appear naturally. Never build it "
+        "on a birth, a founding date or an administrative fact - use the most dramatic EVENT the narration "
+        "tells. Whatever a question takes for granted must be stated by the narration. Never vague words: "
+        "mystery, secret, hidden, echoes, whispers, untold, forgotten, legend, unknown, \"what happened\". "
+        "Do NOT invent facts. title: max 60 characters. hook_text: max 6 words. opening: one sentence that "
+        "replaces the first line of the narration.\n\n"
         f"Current title: {script.title}\nCurrent hook_text: {script.hook_text}\n"
         f"Narration: {script.narration}")
     try:
@@ -733,17 +776,63 @@ def ensure_concrete_hook(llm, script: Script, place_title: bool = False) -> Scri
             log.info("Hook rewrite: %s keeps its old wording (%s not in the narration)", k,
                      ", ".join(sorted(made_up)))
             new[k] = ""
-    if new.get("title") and not vague_hook_reason(new["title"]):
+    if new.get("title") and not vague_hook_reason(new["title"], "title"):
         script.title = truncate_words(re.sub(r"[<>\"“”]", "", strip_emoji(new["title"])).strip(" '-:"), 60)
-    if new.get("hook_text") and not vague_hook_reason(new["hook_text"]):
+    if new.get("hook_text") and not vague_hook_reason(new["hook_text"], "hook_text"):
         script.hook_text = truncate_words(re.sub(r"[<>\"“”]", "", strip_emoji(new["hook_text"])).strip(), 48)
-    if new.get("opening") and not vague_hook_reason(new["opening"]):
+    if new.get("opening") and not vague_hook_reason(new["opening"], "opening"):
         script.scenes[0].narration = clean_narration(new["opening"])
     still = [k for k in parts if vague_hook_reason({"title": script.title, "hook_text": script.hook_text,
-                                                     "opening": script.scenes[0].narration}[k])]
+                                                     "opening": script.scenes[0].narration}[k], k)]
     if still:
-        log.warning("Hook still vague after one rewrite: %s", ", ".join(still))
+        log.warning("Hook still falls short after one rewrite: %s", ", ".join(still))
     return script
+
+
+# ---------------------------------------------------------------------------------- one event, not a list of years
+# San Agustin (Nov 15): "The stone edifice survived earthquakes in 1645, 1699, 1754, 1796, 1825, and 1852." - a
+# list of years is not a story, and as one 11-second sentence it kept a single picture on screen that long.
+MAX_YEARS = 2                    # distinct years a whole narration may name
+
+
+def narration_years(script: Script) -> list[str]:
+    """The distinct years/dated periods the narration names, in order."""
+    return list(dict.fromkeys(m.group(0).strip() for m in YEAR_RE.finditer(script.narration)))
+
+
+def ensure_one_event(llm, script: Script) -> Script:
+    """A story naming more than MAX_YEARS years is rewritten ONCE around its one central event: the other dates
+    go ("later", "a century on" only where the narration already implies it), lists of years become one
+    phrase. Runs before the claim check, which judges the result. Unchanged if the rewrite fails or still lists
+    years."""
+    years = narration_years(script)
+    if script.style not in STORY_STYLES or len(years) <= MAX_YEARS or llm is None:
+        return script
+    log.info("Narration names %d years (%s); rewriting it once around one event", len(years), ", ".join(years))
+    user = (
+        f"This {script.style} Short's narration names {len(years)} different years ({', '.join(years)}). A "
+        "list of years is not a story. Rewrite the NARRATION of the scenes so it names AT MOST TWO years in "
+        "total: keep the date of the ONE central event, drop the others, and turn any list of dates into one "
+        "phrase (\"it survived earthquake after earthquake\"). Keep the SAME scenes in the same order, each "
+        "scene's search_query, image_prompt and historical flag, and every other fact; add nothing new. Keep "
+        "the closing question. Reply with the same JSON shape.\n\n"
+        f"Draft:\n{json.dumps(script.to_dict(), ensure_ascii=False)}")
+    try:
+        data = llm.complete_json("You are a top YouTube Shorts editor. Reply with a single JSON object.", user,
+                                 SCRIPT_SCHEMA, max_tokens=8000)
+    except Exception as e:  # noqa: BLE001
+        log.warning("Years rewrite failed (%s); keeping the narration", e)
+        return script
+    if not isinstance(data, dict) or not data.get("scenes"):
+        return script
+    merged = script.to_dict()
+    merged["scenes"] = data["scenes"]
+    out = normalize(merged, script.topic, script.style, script.language)
+    out.score, out.review, out.rubric = script.score, script.review, script.rubric
+    if len(narration_years(out)) > MAX_YEARS or len(out.scenes) < max(1, len(script.scenes) - 1):
+        log.warning("Years rewrite still lists %d years; keeping the original", len(narration_years(out)))
+        return script
+    return out
 
 
 # ---------------------------------------------------------------------------------- recent violence (#5)
@@ -950,13 +1039,25 @@ def split_scenes(script: Script, seconds: list[float], max_seconds: float = 8.0,
     voice-over runs longer than ``max_seconds`` - and, while there are fewer than ``min_scenes``, the longest
     one - is cut in two at the sentence boundary nearest its middle. ``seconds`` is each scene's spoken length.
     The new scene keeps its parent's search_query, image_prompt and historical flag (each scene still gets
-    its own picture). A one-sentence scene is left whole. The words, and so the voice-over, do not change."""
+    its own picture). A one-sentence scene longer than ``max_seconds`` is cut too - at the comma nearest its
+    middle, else at the word nearest it (San Agustin, Nov 15: one 11-second sentence kept one AI picture on
+    screen). Shorter one-sentence scenes stay whole. The words, and so the voice-over, do not change."""
     scenes, secs = list(script.scenes), list(seconds)
     if len(secs) != len(scenes):
         return script
 
-    def halves(sc: Scene) -> tuple[str, str] | None:
-        parts = [p for p in re.split(r"(?<=[.!?;])\s+", sc.narration.strip()) if p]
+    def halves(sc: Scene, long: bool = False) -> tuple[str, str] | None:
+        text = sc.narration.strip()
+        parts = [p for p in re.split(r"(?<=[.!?;])\s+", text) if p]
+        if len(parts) < 2 and long:
+            # one long sentence: its clauses (after a comma), else its words
+            parts = [p for p in re.split(r"(?<=,)\s+", text) if p]
+            if len(parts) < 2 or min(len(p.split()) for p in parts) < 3:
+                words = text.split()
+                if len(words) < 6:
+                    return None
+                mid = min(range(3, len(words) - 2), key=lambda k: abs(len(" ".join(words[:k])) - len(text) / 2))
+                return " ".join(words[:mid]), " ".join(words[mid:])
         if len(parts) < 2:
             return None
         total = sum(len(p) for p in parts)
@@ -965,13 +1066,14 @@ def split_scenes(script: Script, seconds: list[float], max_seconds: float = 8.0,
 
     for _ in range(64):
         order = sorted(range(len(scenes)), key=lambda i: -secs[i])
-        pick = next((i for i in order if secs[i] > max_seconds and halves(scenes[i])), None)
+        pick = next((i for i in order if secs[i] > max_seconds and halves(scenes[i], long=True)), None)
+        long = pick is not None
         if pick is None and len(scenes) < min_scenes:
             pick = next((i for i in order if halves(scenes[i])), None)
         if pick is None:
             break
         sc = scenes[pick]
-        a, b = halves(sc)
+        a, b = halves(sc, long=long)
         share = len(a) / max(1, len(a) + len(b))
         first = replace(sc, narration=a, emphasis=[e for e in sc.emphasis if e in a])
         second = replace(sc, narration=b, emphasis=[e for e in sc.emphasis if e in b], emoji="")

@@ -224,6 +224,9 @@ _CLAIMS_RULES = (
     "is judged by X: supported, with a quote, if the SOURCE states X; unsupported if it does not.\n"
     "- not_factual: the item asserts nothing checkable - a question to the viewer, direct address, or a "
     "transition (\"Here is what happened next.\").\n"
+    "A QUESTION in the TITLE, the HOOK or the OPENING line is judged by what it takes for granted: \"How did one "
+    "villager's roof survive massive snow?\" claims that a villager's roof survived massive snow - supported "
+    "(with a quote) only if the SOURCE states that, unsupported otherwise. It is never not_factual.\n"
     "If only part of an item is supported, the verdict is unsupported. \"quote\" is empty unless the verdict is "
     "supported. Return every id exactly once.\n")
 
@@ -466,13 +469,19 @@ def claim_items(script, kinds: tuple[str, ...] = ("title", "hook", "description"
         if text and kind in kinds:
             items.append({"id": len(items), "kind": kind, "text": text, **extra})
 
-    add("title", script.title)
-    add("hook", script.hook_text)
+    add("title", script.title, role="TITLE")
+    add("hook", script.hook_text, role="HOOK")
     add("description", _SENT_SPLIT.split((script.description or "").strip(), maxsplit=1)[0])
     for si, sc in enumerate(script.scenes):
         for k, sent in enumerate(_SENT_SPLIT.split((sc.narration or "").strip())):
-            add("narration", sent, scene=si, pos=k)
+            add("narration", sent, scene=si, pos=k, **({"role": "OPENING"} if si == 0 and k == 0 else {}))
     return items
+
+
+HEADLINE_ROLES = ("TITLE", "HOOK", "OPENING")
+# Week 2: titles, hooks and openings are curiosity questions. A question used to pass as "not factual", so its
+# premise ("How did one villager's roof survive massive snow?" -> the roof survived) went unchecked.
+_HEADLINE_QUESTION = "a headline question must be supported by what it takes for granted"
 
 
 _REQUOTE_NOTE = ("NOTE: you called these items supported, but the quote you gave is not word for word in the "
@@ -485,7 +494,8 @@ def _ask(llm, items: list[dict], shown: str, note: str = "") -> dict[int, dict]:
     user = ("SOURCE (the only evidence that counts):\n<<<\n" + shown + "\n>>>\n\n" + _CLAIMS_RULES + note
             + 'Reply with JSON {"items": [{"id": <int>, "verdict": "supported|unsupported|not_factual", '
               '"quote": "...", "unsupported_part": "..."}]}.\n\nITEMS:\n'
-            + json.dumps([{"id": it["id"], "text": it["text"]} for it in items], ensure_ascii=False))
+            + json.dumps([{"id": it["id"], "text": it["text"], **({"role": it["role"]} if it.get("role") else {})}
+                          for it in items], ensure_ascii=False))
     try:
         # Groq's free tier refuses a request whose prompt + max_tokens exceeds 8,000 (HTTP 413), so the reply
         # budget is kept small - and the checker is asked for short reasoning (effort="low"): with the default
@@ -535,6 +545,8 @@ def _judge(item: dict, reply: dict | None, source_norm: str, source_digits: str,
         names = _names(text, allow) if sentence else []
         if numbers:
             row["reason"] = f"called not factual but states a number not in the source: {', '.join(numbers)}"
+        elif item.get("role") in HEADLINE_ROLES and text.rstrip().endswith("?"):
+            row["reason"] = _HEADLINE_QUESTION
         elif text.rstrip().endswith("?"):                  # a question may name what the source names
             missing = [n for n in names if not _name_in_source(n, source_norm)]
             if missing:
@@ -552,11 +564,12 @@ def _rewrite_headline(llm, script, quotes: list[str], which: list[str], title_le
     """ONE rewrite of an unsupported title / on-screen hook from the supported quotes only."""
     user = (
         "The " + " and the ".join("on-screen hook_text" if w == "hook" else w for w in which) + " of this "
-        "YouTube Short state something the source article does not. Rewrite so each states ONLY what the QUOTES "
-        "below state - concrete stakes (who or what, and what was won or lost). Use a number, date or "
-        "superlative only if a quote contains it. Never vague mystery words (mystery, secret, hidden, legend, "
-        "forgotten, untold). Do NOT add any fact that is not in the quotes. "
-        f"title: max {title_len} characters, no place name, no hashtags, no quotes. hook_text: max 6 words. "
+        "YouTube Short state something the source article does not. Rewrite each as a CURIOSITY QUESTION or a "
+        "SURPRISING CONTRAST with human stakes (people, and what they survived, lost, risked or uncovered) whose "
+        "every premise is stated by the QUOTES below. NO years or dates. Never \"PLACE: fact\"; the place's name "
+        "may appear naturally. Never vague mystery words (mystery, secret, hidden, legend, forgotten, untold). "
+        "Do NOT add any fact that is not in the quotes. "
+        f"title: max {title_len} characters, no hashtags, no quotes. hook_text: max 6 words. "
         "Return both, unchanged if one of them was not named above.\n\n"
         f"Current title: {script.title}\nCurrent hook_text: {script.hook_text}\n\nQUOTES from the source:\n"
         + "\n".join(f"- {q}" for q in quotes[:14]))

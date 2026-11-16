@@ -421,8 +421,8 @@ def test_the_writer_and_the_script_doctor_are_told_not_to_add_what_the_source_la
     from purffle_shorts.script import STAKES_RULE, build_prompt, review_prompt
     _system, user = build_prompt("Kampong Ayer", "history", Settings(), [], context=KAMPONG_AYER, place_title=True)
     assert "checked against that background" in user and "is DELETED" in user
-    assert "Do NOT add weather" in user and "TAKEN FROM THE BACKGROUND" in user
-    assert "TAKEN FROM THE BACKGROUND" in STAKES_RULE and "never make" in STAKES_RULE
+    assert "Do NOT add weather" in user and "taken from the background" in user
+    assert "taken from the background" in STAKES_RULE and "it is checked" in STAKES_RULE
     story = _script(["Kampong Ayer stands on stilts above the Brunei River."])
     assert "This is a TRUE story" in review_prompt(story, Settings(), rewrite=True)[1]
     quiz = _script(["Which animal has three hearts?"])

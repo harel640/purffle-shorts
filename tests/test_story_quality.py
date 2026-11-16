@@ -125,11 +125,11 @@ def test_the_hook_rewrite_cannot_invent_a_number():
     from purffle_shorts.script import ensure_concrete_hook
     s = _script("A hidden library waited in the desert.", "In 1900 Wang Yuanlu found thousands of scrolls.",
                 title="The hidden library", hook="A HIDDEN LIBRARY")
-    out = ensure_concrete_hook(_HookLLM({"title": "1900 Discovery Saved 2,000 Manuscripts",
-                                         "hook_text": "Thousands of scrolls found in 1900",
+    out = ensure_concrete_hook(_HookLLM({"title": "How did one man save 2,000 manuscripts?",
+                                         "hook_text": "Who found thousands of scrolls?",
                                          "opening": "In 1900 one man found 2,000 scrolls."}), s)
     assert out.title == "The hidden library"                          # 2,000 is not in the narration
-    assert out.hook_text == "Thousands of scrolls found in 1900"      # 1900 is
+    assert out.hook_text == "Who found thousands of scrolls?"         # nothing invented, a curiosity question
     assert out.scenes[0].narration == "A hidden library waited in the desert."
 
 
@@ -143,9 +143,22 @@ def test_long_scenes_are_split_at_sentence_ends():
     assert out.scenes[0].historical and out.scenes[1].image_prompt == "a priest at a wall"
 
 
-def test_a_one_sentence_scene_is_left_whole():
-    s = _script("A single long sentence that runs on and on without a break")
-    assert split_scenes(s, [12.0]) is s
+def test_a_long_single_sentence_is_split_too():
+    # San Agustin, Nov 15: this one sentence ran 10.9 s - one AI picture on screen that long
+    s = _script("The stone edifice survived earthquakes in 1645, 1699, 1754, 1796, 1825, and 1852.",
+                "It stood.")
+    out = split_scenes(s, [10.9, 1.5], max_seconds=8.0, min_scenes=1)
+    assert len(out.scenes) == 3
+    assert " ".join(sc.narration for sc in out.scenes[:2]) == s.scenes[0].narration
+    assert all(len(sc.narration.split()) >= 3 for sc in out.scenes[:2])
+    no_comma = _script("A very long single sentence that runs on and on for well over eight seconds of voice")
+    assert len(split_scenes(no_comma, [9.0], max_seconds=8.0, min_scenes=1).scenes) == 2
+
+
+def test_a_short_one_sentence_scene_is_left_whole():
+    s = _script("A single sentence that runs on without a break")
+    assert split_scenes(s, [6.0], min_scenes=1) is s
+    assert len(split_scenes(s, [12.0], min_scenes=1).scenes) == 2          # over 8 s: split after all
 
 
 @pytest.mark.parametrize("text, modern", [

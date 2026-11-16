@@ -72,22 +72,33 @@ def _script(title="The Richest City That Vanished", hook="LOST CITY OF KINGS", d
 
 
 @pytest.mark.parametrize("hook, place, expect", [
-    ("The Richest City That Vanished", "Hampi", "HAMPI: The Richest City That Vanished #shorts"),
-    ("Hampi: the richest city that vanished", "Hampi", "HAMPI: The richest city that vanished #shorts"),
+    # Week 2: the headline itself, no "PLACE: " label in front (a label the writer added anyway is taken off)
+    ("How did one of history's richest cities vanish in months?", "Hampi",
+     "How did one of history's richest cities vanish in months? #shorts"),
+    ("HAMPI: How did a capital vanish in months?", "Hampi", "How did a capital vanish in months? #shorts"),
     ("A cave big enough to fly a jet through", "Gunung Mulu National Park",
-     "GUNUNG MULU: A cave big enough to fly a jet through #shorts"),
-    ("A village frozen in snow and time", "Shirakawa-go", "SHIRAKAWA-GO: A village frozen in snow and time #shorts"),
+     "A cave big enough to fly a jet through #shorts"),
 ])
-def test_title_leads_with_the_place_then_the_hook(hook, place, expect):
-    assert place_title(hook, place) == expect and len(expect) < 60
+def test_the_title_is_the_headline_without_a_place_label(hook, place, expect):
+    assert place_title(hook, place) == expect and len(expect) <= 68
 
 
-def test_title_never_reaches_60_and_a_long_hook_gives_way_to_the_short_one():
-    long = "Why does this ancient Shiva temple on the shore stand untouched for sixteen centuries"
-    t = final_title(_script(title=long, hook="ANCIENT STONE DEFIES TIME"), Settings(), place="Gokarna")
-    assert t == "GOKARNA: Ancient Stone Defies Time #shorts" and len(t) < 60
+def test_a_year_never_reaches_the_title():
+    # Week 2: "VIGAN: Juan de Salcedo Founded City 1572" - dry date statements got 50-150 views
+    t = final_title(_script(title="Church survived 1863 quake", hook="Only building left standing"), Settings(),
+                    place="San Agustin Church")
+    assert t == "Only building left standing #shorts"
+    t = final_title(_script(title="Church survived 1863 quake", hook="Quake of 1863"), Settings(),
+                    place="San Agustin Church")
+    assert t == "Church survived quake #shorts"
+
+
+def test_a_long_headline_gives_way_to_the_short_hook():
+    long = "Why does this ancient Shiva temple on the shore still stand after sixteen centuries of storms?"
+    t = final_title(_script(title=long, hook="How did stone outlast the sea?"), Settings(), place="Gokarna")
+    assert t == "How did stone outlast the sea? #shorts"
     for place in ("Mahabaleshwar Temple", "Ban Gioc–Detian Falls", "Khangchendzonga National Park"):
-        assert len(final_title(_script(title=long, hook=""), Settings(), place=place)) < 60
+        assert len(final_title(_script(title=long, hook=""), Settings(), place=place)) <= 68
 
 
 def test_non_place_videos_keep_the_old_title():
