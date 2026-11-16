@@ -582,3 +582,32 @@ def test_groq_payload_carries_reasoning_effort_only_for_gpt_oss(monkeypatch):
     llama = L.OpenAICompatible(groq, "llama-3.3-70b-versatile", "k", "https://x")
     llama.complete("s", "u", effort="low")
     assert "reasoning_effort" not in sent[-1] and not llama.takes_effort()
+
+
+# ------------------------------------------------------------------ week 2: the opening question is checked by its premise
+OPENING_BAD = "How did one storm wash a whole village down the river?"          # nothing like it in the article
+OPENING_GOOD = "Why were whole houses here built light enough to be moved?"
+WEEK2 = {**BASE, TRUE_NOORT[:40]: ("supported", NOORT),
+         OPENING_GOOD: ("supported", NOORT)}
+
+
+def test_an_unsupported_opening_question_is_rewritten_from_the_source():
+    llm = Checker(WEEK2, headline={"title": "", "hook_text": "", "opening": OPENING_GOOD})
+    s, _ = factcheck.verify_claims(llm, _script([OPENING_BAD, TRUE_NOORT]), KAMPONG_AYER, place_words="Kampong Ayer")
+    assert s.scenes[0].narration == OPENING_GOOD and s.scenes[1].narration == TRUE_NOORT
+    assert llm.rewrites == 1 and "spoken opening line" in llm.prompts[-2]
+
+
+def test_without_a_supported_opening_the_video_starts_with_its_next_line():
+    llm = Checker(WEEK2, headline={"title": "", "hook_text": "", "opening": OPENING_BAD})
+    s, _ = factcheck.verify_claims(llm, _script([OPENING_BAD, TRUE_NOORT]), KAMPONG_AYER, place_words="Kampong Ayer")
+    assert [sc.narration for sc in s.scenes] == [TRUE_NOORT]                   # no skip, no invented hook
+
+
+def test_an_opening_question_cannot_hide_its_premise_as_not_factual():
+    llm = Checker({**WEEK2, OPENING_BAD: ("not_factual", "")},
+                  headline={"title": "", "hook_text": "", "opening": OPENING_GOOD})
+    s, report = factcheck.verify_claims(llm, _script([OPENING_BAD, TRUE_NOORT]), KAMPONG_AYER,
+                                        place_words="Kampong Ayer")
+    first = next(r for r in report["items"] if r.get("role") == "OPENING" and not r.get("rewritten"))
+    assert first["verdict"] == "unsupported" and s.scenes[0].narration == OPENING_GOOD
