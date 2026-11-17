@@ -52,7 +52,8 @@ TRUE_NOORT = ("In 1600 the Dutch visitor Olivier van Noort wrote that the houses
 
 class Checker:
     """A fake checker LLM. ``table`` maps a piece of an item's text to (verdict, quote); anything else is
-    'unsupported'. ``headline`` is the reply to the title/hook rewrite. ``fail`` makes every call raise."""
+    'unsupported'. ``headline`` is the reply to the headline-candidates call (a list: one reply per call, the
+    last one repeated). ``fail`` makes every call raise."""
 
     def __init__(self, table=None, headline=None, fail=False, skip_ids=()):
         self.table, self.headline, self.fail, self.skip_ids = table or {}, headline, fail, set(skip_ids)
@@ -65,7 +66,10 @@ class Checker:
         if schema is factcheck.HEADLINE_SCHEMA:
             self.rewrites += 1
             self.prompts.append(user)
-            return self.headline
+            h = self.headline
+            if isinstance(h, list):
+                h = h[min(self.rewrites, len(h)) - 1]
+            return h
         assert schema is factcheck.CLAIMS_SCHEMA and temperature == 0.0
         self.prompts.append(user)
         out = []
@@ -221,7 +225,7 @@ def test_an_item_the_checker_skipped_counts_as_unsupported():
 def test_an_unsupported_title_is_rewritten_from_the_quotes_and_checked_again():
     table = dict(BASE)
     table["Houses built to move in a storm"] = ("supported", NOORT)
-    llm = Checker(table, headline={"title": "Houses built to move in a storm", "hook_text": "HOUSES THAT MOVE"})
+    llm = Checker(table, headline={"titles": ["Houses built to move in a storm"], "hooks": [], "openings": []})
     sc = _script(["Kampong Ayer stands on stilts above the Brunei River.", TRUE_NOORT],
                  title="A storm swept a village away")
     out, report = factcheck.verify_claims(llm, sc, KAMPONG_AYER, place_words="Kampong Ayer", title_len=40)
@@ -231,14 +235,16 @@ def test_an_unsupported_title_is_rewritten_from_the_quotes_and_checked_again():
     assert any(r.get("rewritten") and r["kind"] == "title" and r["verdict"] == "supported" for r in report["items"])
 
 
-def test_a_title_that_cannot_be_supported_skips_the_story_or_is_kept_for_a_manual_topic():
-    llm = Checker(dict(BASE), headline={"title": "A storm destroyed it all", "hook_text": "HOUSES THAT MOVE"})
+def test_a_title_no_candidate_supports_never_skips_the_story_or_is_kept_for_a_manual_topic():
+    llm = Checker(dict(BASE), headline={"titles": ["A storm destroyed it all"], "hooks": [], "openings": []})
 
     def story():
         return _script(["Kampong Ayer stands on stilts above the Brunei River.", TRUE_NOORT],
                        title="A storm swept a village away")
-    with pytest.raises(factcheck.NothingSupported, match="title could not be supported"):
-        factcheck.verify_claims(llm, story(), KAMPONG_AYER, place_words="Kampong Ayer")
+    out, report = factcheck.verify_claims(llm, story(), KAMPONG_AYER, place_words="Kampong Ayer")
+    # the last resort: the best-supported sentence itself, years out - it was checked as narration
+    assert out.title == "Kampong Ayer stands on stilts above the Brunei River" and TRUE_NOORT in out.narration
+    assert any(r.get("rewritten") and r["kind"] == "title" and r["verdict"] == "supported" for r in report["items"])
     out, _ = factcheck.verify_claims(llm, story(), KAMPONG_AYER, place_words="Kampong Ayer", strict=False)
     assert out.title == "A storm swept a village away" and TRUE_NOORT in out.narration
 
@@ -592,21 +598,21 @@ WEEK2 = {**BASE, TRUE_NOORT[:40]: ("supported", NOORT),
 
 
 def test_an_unsupported_opening_question_is_rewritten_from_the_source():
-    llm = Checker(WEEK2, headline={"title": "", "hook_text": "", "opening": OPENING_GOOD})
+    llm = Checker(WEEK2, headline={"titles": [], "hooks": [], "openings": [OPENING_GOOD]})
     s, _ = factcheck.verify_claims(llm, _script([OPENING_BAD, TRUE_NOORT]), KAMPONG_AYER, place_words="Kampong Ayer")
     assert s.scenes[0].narration == OPENING_GOOD and s.scenes[1].narration == TRUE_NOORT
-    assert llm.rewrites == 1 and "spoken opening line" in llm.prompts[-2]
+    assert llm.rewrites == 1 and "spoken opening lines" in llm.prompts[-2]
 
 
 def test_without_a_supported_opening_the_video_starts_with_its_next_line():
-    llm = Checker(WEEK2, headline={"title": "", "hook_text": "", "opening": OPENING_BAD})
+    llm = Checker(WEEK2, headline={"titles": [], "hooks": [], "openings": [OPENING_BAD]})
     s, _ = factcheck.verify_claims(llm, _script([OPENING_BAD, TRUE_NOORT]), KAMPONG_AYER, place_words="Kampong Ayer")
     assert [sc.narration for sc in s.scenes] == [TRUE_NOORT]                   # no skip, no invented hook
 
 
 def test_an_opening_question_cannot_hide_its_premise_as_not_factual():
     llm = Checker({**WEEK2, OPENING_BAD: ("not_factual", "")},
-                  headline={"title": "", "hook_text": "", "opening": OPENING_GOOD})
+                  headline={"titles": [], "hooks": [], "openings": [OPENING_GOOD]})
     s, report = factcheck.verify_claims(llm, _script([OPENING_BAD, TRUE_NOORT]), KAMPONG_AYER,
                                         place_words="Kampong Ayer")
     first = next(r for r in report["items"] if r.get("role") == "OPENING" and not r.get("rewritten"))

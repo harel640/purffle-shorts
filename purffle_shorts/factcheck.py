@@ -199,9 +199,9 @@ CLAIMS_SCHEMA = {
         "required": ["id", "verdict", "quote", "unsupported_part"]}}},
     "required": ["items"]}
 HEADLINE_SCHEMA = {"type": "object", "additionalProperties": False,
-                   "properties": {"title": {"type": "string"}, "hook_text": {"type": "string"},
-                                  "opening": {"type": "string"}},
-                   "required": ["title", "hook_text", "opening"]}
+                   "properties": {k: {"type": "array", "items": {"type": "string"}}
+                                  for k in ("titles", "hooks", "openings")},
+                   "required": ["titles", "hooks", "openings"]}
 
 CLAIMS_SYSTEM = ("You are a strict fact-checker. You compare sentences with a SOURCE text and reply only with "
                  "strict JSON. You never use your own knowledge: only what the SOURCE states counts.")
@@ -252,9 +252,10 @@ class NothingSupported(RuntimeError):
     """The story has no supported narration left, or its title/hook cannot be supported by the source.
     ``report`` holds the verdicts that led to it."""
 
-    def __init__(self, message: str, report: dict | None = None):
+    def __init__(self, message: str, report: dict | None = None, headline: bool = False):
         super().__init__(message)
         self.report = report or {}
+        self.headline = headline         # only the headline failed: the place is given back, not used up
 
 
 # Names in their own script (Tibetan, Chinese, Devanagari, Arabic ...) and IPA sit in most articles about Asia.
@@ -562,24 +563,58 @@ def _judge(item: dict, reply: dict | None, source_norm: str, source_digits: str,
     return row
 
 
-def _rewrite_headline(llm, script, quotes: list[str], which: list[str], title_len: int) -> dict:
-    """ONE rewrite of an unsupported title / on-screen hook from the supported quotes only."""
-    names = {"hook": "on-screen hook_text", "opening": "spoken opening line"}
-    user = (
-        "The " + " and the ".join(names.get(w, w) for w in which) + " of this "
-        "YouTube Short state something the source article does not. Rewrite each as a CURIOSITY QUESTION or a "
-        "SURPRISING CONTRAST with human stakes (people, and what they survived, lost, risked or uncovered) whose "
-        "every premise is stated by the QUOTES below. NO years or dates. Never \"PLACE: fact\"; the place's name "
-        "may appear naturally. Never vague mystery words (mystery, secret, hidden, legend, forgotten, untold). "
-        "Do NOT add any fact that is not in the quotes. "
-        f"title: max {title_len} characters, no hashtags, no quotes. hook_text: max 6 words. opening: one spoken "
-        "sentence of 8-14 words (a year is allowed there). Return all three, unchanged (opening: \"\") if it was "
-        "not named above.\n\n"
-        f"Current title: {script.title}\nCurrent hook_text: {script.hook_text}\n\nQUOTES from the source:\n"
-        + "\n".join(f"- {q}" for q in quotes[:14]))
+HEADLINE_CANDIDATES = 4          # titles and on-screen hooks written when the writer's own is not supported
+_HEADLINE_LISTS = {"title": "titles", "hook": "hooks", "opening": "openings"}
+_HEADLINE_RULES = (
+    "Each is a CURIOSITY QUESTION or a SURPRISING CONTRAST with human stakes (people, and what they survived, "
+    "lost, risked or uncovered). NO years or dates in a title or a hook. Never \"PLACE: fact\"; the place's name "
+    "may appear naturally. Never vague mystery words (mystery, secret, hidden, legend, forgotten, untold). "
+    "Whatever a question takes for granted must be STATED by the quotes: do NOT add any fact, cause, motive, "
+    "number, name or event that is not in them.")
+
+
+def _headline_options(llm, script, quotes: list[str], which: list[str], title_len: int, n: int,
+                      note: str = "") -> dict[str, list[str]]:
+    """``n`` candidate titles / on-screen hooks (and 2 spoken openings, when asked) written from the supported
+    quotes only, in one call. {"title": [...], "hook": [...], "opening": [...]} for the parts in ``which``."""
+    want = {"title": f"titles: {n} DIFFERENT titles, max {title_len} characters each, no hashtags, no quotes",
+            "hook": f"hooks: {n} DIFFERENT on-screen hooks, max 6 words each",
+            "opening": "openings: 2 DIFFERENT spoken opening lines, one sentence of 8-14 words each (a year is "
+                       "allowed there)"}
+    user = (note + "Write headline options for this YouTube Short. " + _HEADLINE_RULES + "\n"
+            + "\n".join(f"- {want[k]}" for k in which)
+            + "\nReturn [] for a list that is not asked for above.\n\n"
+            f"Current title: {script.title}\nCurrent hook_text: {script.hook_text}\n\nQUOTES from the source:\n"
+            + "\n".join(f"- {q}" for q in quotes[:14]))
     d = llm.complete_json("You are a careful YouTube Shorts editor. Reply with strict JSON.", user,
-                          HEADLINE_SCHEMA, max_tokens=2000, temperature=0.2, effort="low")
-    return d if isinstance(d, dict) else {}
+                          HEADLINE_SCHEMA, max_tokens=2000, temperature=0.5, effort="low")
+    out: dict[str, list[str]] = {}
+    for k in which:
+        vals = d.get(_HEADLINE_LISTS[k]) if isinstance(d, dict) else None
+        out[k] = [v for v in vals if isinstance(v, str) and v.strip()][:n] if isinstance(vals, list) else []
+    return out
+
+
+def _best_row(rows: list[dict], fit: int = 0) -> dict | None:
+    """The supported narration sentence a safe headline is built on: the one with the most human stakes (who
+    survived, lost, built or uncovered what), never a birth/founding/administrative fact, then the closest
+    to its quote. ``fit``: prefer a sentence that is at most that long once its years are out (a title)."""
+    from .script import _DRY_RE, _STAKES_RE           # script does not import factcheck: no cycle
+    ok = [r for r in rows if r["kind"] == "narration" and r["verdict"] == "supported" and r.get("quote")
+          and not r["text"].rstrip().endswith("?")]
+    if not ok:
+        return None
+    if fit:
+        ok = [r for r in ok if len(_strip_years(r["text"]).rstrip(".")) <= fit] or ok
+    return max(ok, key=lambda r: (not _DRY_RE.search(r["text"]), len(_STAKES_RE.findall(r["text"])),
+                                  r.get("overlap") or 0.0))
+
+
+def _strip_years(text: str) -> str:
+    from .script import YEAR_RE
+    t = re.sub(r"\s*\b(?:in|from|since|by|of|around)\s+(?=" + YEAR_RE.pattern + ")", " ", text, flags=re.I)
+    t = YEAR_RE.sub("", t)
+    return re.sub(r"\s{2,}", " ", re.sub(r"\s+([?.!,;:])", r"\1", t)).strip(" ,;:-")
 
 
 def _tidy(text: str, limit: int) -> str:
@@ -706,54 +741,113 @@ def verify_claims(llm, script, source_text: str, *, place_words: str = "",
                 r["verdict"], r["reason"] = "unsupported", "a description must be supported by a quote"
             script.description = ""
 
-    # -- title / hook: one rewrite from the supported quotes, then checked again
+    # -- title / hook / opening: a headline never costs the video. The writer's own is candidate one; if the
+    # source does not support it, HEADLINE_CANDIDATES more of each are written from the supported quotes and
+    # ALL are checked; the first supported one wins. If none is, a safe headline is written from the single
+    # best-supported sentence and checked; if even that fails, the title is that supported sentence itself
+    # (years taken out) and the on-screen hook is left off. Every headline that is used has passed the check.
     which = [k for k in ("title", "hook") if any(r["verdict"] == "unsupported" for r in by_kind[k])]
     asked = which + (["opening"] if opening_bad and "narration" in kinds and first_scene is not None else [])
     if asked:
+        from .script import vague_hook_reason
         quotes = list(dict.fromkeys(r["quote"] for r in rows if r["verdict"] == "supported" and r["quote"]))
-        fixed = False
+        role = {"title": "TITLE", "hook": "HOOK", "opening": "OPENING"}
+        rule_kind = {"title": "title", "hook": "hook_text", "opening": "opening"}
+        chosen: dict[str, dict] = {}
+
+        def try_candidates(options: dict[str, list[str]], stage: str) -> None:
+            """Check every candidate in one batch; keep, per part, the first supported one that also meets the
+            headline rule (curiosity, stakes, no year), else the first supported one."""
+            tidy = {"title": lambda t: _tidy(t, 60), "hook": lambda t: _tidy(t, 48),
+                    "opening": lambda t: clean_narration(t.strip())}
+            batch = []
+            for k in asked:
+                if k in chosen:
+                    continue
+                for t in dict.fromkeys(tidy[k](str(x)) for x in options.get(k, [])):
+                    if t:
+                        batch.append({"id": len(batch), "kind": "narration" if k == "opening" else k, "text": t,
+                                      "role": role[k], "part": k})
+            if not batch:
+                return
+            judged = judge([{x: v for x, v in it.items() if x != "part"} for it in batch])
+            for it, r in zip(batch, judged):
+                r["part"] = it["part"]
+            log.info("Claim check: %s - %d of %d headline candidates supported", stage,
+                     sum(r["verdict"] != "unsupported" for r in judged), len(judged))
+            for k in asked:
+                if k in chosen:
+                    continue
+                good = [r for r in judged if r["part"] == k and r["verdict"] != "unsupported"]
+                best = next((r for r in good if not vague_hook_reason(r["text"], rule_kind[k])), None)
+                if best is None and good:
+                    best = good[0]
+                if best is not None:
+                    chosen[k] = best
+
         if not quotes:
             log.info("Claim check: nothing in the story is supported, so the %s cannot be rewritten",
                      " and ".join(asked))
-        if quotes:
+        else:
             try:
-                new = _rewrite_headline(llm, script, quotes, asked, title_len)
+                try_candidates(_headline_options(llm, script, quotes, asked, title_len, HEADLINE_CANDIDATES),
+                               f"{HEADLINE_CANDIDATES} new candidates")
+            except FactCheckUnavailable:
+                raise
             except Exception as e:  # noqa: BLE001
-                log.warning("Claim check: title/hook rewrite failed (%s)", redact(e))
-                new = {}
-            cand = {"title": _tidy(str(new.get("title", "")), 60), "hook": _tidy(str(new.get("hook_text", "")), 48),
-                    "opening": clean_narration(str(new.get("opening", "")).strip())}
-            role = {"title": "TITLE", "hook": "HOOK", "opening": "OPENING"}
-            again = [{"id": i, "kind": "narration" if k == "opening" else k, "text": cand[k], "role": role[k]}
-                     for i, k in enumerate(asked) if cand[k]]
-            rechecked = judge(again) if again else []
-            ok = {r["role"]: r for r in rechecked if r["verdict"] != "unsupported"}
-            if all(role[k] in ok for k in which):
-                for k in which:
-                    r = ok[role[k]]
-                    setattr(script, "title" if k == "title" else "hook_text", r["text"])
-                    r["id"], r["rewritten"] = len(rows), True
-                    rows.append(r)
-                fixed = True
-            if "opening" in asked:
-                r = ok.get("OPENING")
-                if r is not None:
-                    # put the supported opening back in front, in the first scene's picture slot
-                    if script.scenes and script.scenes[0] is first_scene and not first_scene_alone:
-                        first_scene.narration = clean_narration(f"{r['text']} {first_scene.narration}")
-                    else:
-                        script.scenes.insert(0, replace(first_scene, narration=r["text"], emphasis=[], emoji=""))
-                    r["id"], r["rewritten"] = len(rows), True
-                    rows.append(r)
-                    log.info("Claim check: opening rewritten from the source: %s", r["text"])
-                else:
-                    log.warning("Claim check: no supported opening question; the video starts with its next line")
-            fixed = fixed or not which
-        if which and not fixed:
-            what = " and ".join("on-screen hook" if k == "hook" else k for k in which)
+                log.warning("Claim check: headline candidates failed (%s)", redact(e))
+            safe_row = _best_row(rows)
+            missing = [k for k in asked if k not in chosen]
+            if missing and safe_row is not None:
+                note = ("Build them on THIS ONE QUOTE only - restate what it says as a question or a contrast, "
+                        "adding nothing.\n")
+                try:
+                    try_candidates(_headline_options(llm, script, [safe_row["quote"]], missing, title_len, 2,
+                                                     note=note), "safe headline from the best-supported sentence")
+                except FactCheckUnavailable:
+                    raise
+                except Exception as e:  # noqa: BLE001
+                    log.warning("Claim check: safe headline failed (%s)", redact(e))
+            last = _best_row(rows, fit=60)
+            if strict and "title" in which and "title" not in chosen and last is not None:
+                # last resort: the best-supported sentence itself - already checked, years taken out
+                text = _tidy(_strip_years(last["text"]).rstrip("."), 60)
+                text = text[:1].upper() + text[1:]
+                if text:
+                    chosen["title"] = {**last, "kind": "title", "role": "TITLE", "text": text}
+                    log.warning("Claim check: no supported headline question; the title is the best-supported "
+                                "sentence: %s", text)
+        if "hook" in which and "hook" not in chosen:
             if strict:
-                raise NothingSupported(f"the {what} could not be supported by the source", report())
-            log.warning("Claim check: the %s is not supported by the source; kept (the topic was chosen by hand)",
-                        what)
+                script.hook_text = ""                    # no on-screen hook rather than an unsupported one
+                log.warning("Claim check: no supported on-screen hook; the video shows none")
+            else:
+                log.warning("Claim check: the on-screen hook is not supported by the source; kept (the topic "
+                            "was chosen by hand)")
+        for k in which:
+            r = chosen.get(k)
+            if r is not None:
+                setattr(script, "title" if k == "title" else "hook_text", r["text"])
+                r["id"], r["rewritten"] = len(rows), True
+                rows.append(r)
+                log.info("Claim check: %s from the source: %s", k, r["text"])
+        if "opening" in asked:
+            r = chosen.get("opening")
+            if r is not None:
+                # put the supported opening back in front, in the first scene's picture slot
+                if script.scenes and script.scenes[0] is first_scene and not first_scene_alone:
+                    first_scene.narration = clean_narration(f"{r['text']} {first_scene.narration}")
+                else:
+                    script.scenes.insert(0, replace(first_scene, narration=r["text"], emphasis=[], emoji=""))
+                r["id"], r["rewritten"] = len(rows), True
+                rows.append(r)
+                log.info("Claim check: opening rewritten from the source: %s", r["text"])
+            else:
+                log.warning("Claim check: no supported opening question; the video starts with its next line")
+        if "title" in which and "title" not in chosen:
+            # only when NOTHING in the story is supported to build a title on
+            if strict:
+                raise NothingSupported("the title could not be supported by the source", report(), headline=True)
+            log.warning("Claim check: the title is not supported by the source; kept (the topic was chosen by hand)")
 
     return script, report()
