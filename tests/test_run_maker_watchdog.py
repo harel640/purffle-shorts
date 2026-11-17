@@ -31,10 +31,12 @@ def test_watchdog_present_and_copies_in_sync():
     for p in _copies("run-maker.ps1"):
         text = p.read_text(encoding="utf-8")
         assert "MaxRunMinutes = 25" in text                 # 25-minute hard ceiling
-        assert "WaitForExit($MaxRunMinutes" in text          # bounded wait on the container
+        assert "WaitForExit($AttemptMinutes" in text         # bounded wait on the container
+        assert "$AttemptMinutes = [math]::Min($MaxRunMinutes" in text   # never over 25 min, cut to fit the task
         assert "docker kill" in text                         # kill the container on overrun
         assert "TIMEOUT" in text                             # recorded in the daily summary
-        assert "retrying once" in text                       # and retried once
+        assert "MaxAttempts   = 3" in text                   # up to 3 place attempts per run
+        assert "$left -lt $MinAttemptMinutes" in text        # only if one still fits in the task's hour
         assert "SKIPPED vision unavailable" in text          # fail-closed vision skip surfaced in the summary
         assert "$null = $p.Handle" in text                   # else ExitCode reads empty and every run "fails"
         assert "if ($r.Uploaded)" in text                    # a run that uploaded is never retried

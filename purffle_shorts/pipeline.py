@@ -164,7 +164,11 @@ def failure_kind(e: BaseException) -> str:
                   violence, length gate, unsupported claims): it stays used;
     "transient" - something needed was down (every LLM, every voice, vision, the fact checker, the network):
                   the place is given back for a later run;
-    "error"     - anything else (a bug): the place stays used, so one broken place cannot stall the list."""
+    "error"     - anything else (a bug): the place stays used, so one broken place cannot stall the list;
+    "headline"  - only the title/hook could not be supported (the narration was): the place is given back,
+                  since a later run writes a new headline for it."""
+    if headline_only(e):
+        return "headline"
     if isinstance(e, (SkipTopic, safety.UnsafeTopic)):
         return "transient" if getattr(e, "transient", False) else "rule"
     if isinstance(e, factcheck.NothingSupported):
@@ -181,6 +185,15 @@ def failure_kind(e: BaseException) -> str:
             return "transient"
         x = x.__cause__ or x.__context__
     return "error"
+
+
+def headline_only(e: BaseException) -> bool:
+    """True when a run ended only because its title/hook could not be supported (factcheck.NothingSupported
+    with ``headline``), directly or as the cause of a SkipTopic."""
+    for x in (e, getattr(e, "__cause__", None)):
+        if isinstance(x, factcheck.NothingSupported) and getattr(x, "headline", False):
+            return True
+    return False
 
 
 MAX_IMAGE_SECONDS = 8.0      # no picture of a story stays on screen longer than this
@@ -590,10 +603,11 @@ class Studio:
     def _settle_claim(self, pick: Topic, e: BaseException) -> None:
         """After a run that made no video: a listed place skipped only because something it needed was down
         (failure_kind "transient"), or a cancelled run, gives its claim back so a later run takes it again;
-        any other end uses the claim up for good."""
+        a run that failed only on its headline (failure_kind "headline") gives it back too; any other end uses
+        the claim up for good."""
         if not pick.key:
             return
-        if isinstance(e, (Cancelled, KeyboardInterrupt)) or failure_kind(e) == "transient":
+        if isinstance(e, (Cancelled, KeyboardInterrupt)) or failure_kind(e) in ("transient", "headline"):
             if pick.source == "list" and self.history.topic_used(pick.key):
                 self.history.release_topic(pick.key)
                 log.info("Topic list: %s released - a later run will try it again", pick.place or pick.subject)
@@ -607,6 +621,7 @@ class Studio:
         if pick is not None:
             self._settle_claim(pick, e)
         what = {"transient": "TRANSIENT failure (an outage, not the place) - the place is given back",
+                "headline": "HEADLINE skip (only the title/hook was unsupported) - the place is given back",
                 "rule": "RULE skip - the place stays used",
                 "error": "ERROR - the place stays used"}[kind]
         log.warning("Run ended by a %s: %s (%s)", what, name, redact(e))
