@@ -458,6 +458,7 @@ def test_draft_checks_claims_last_so_the_hook_rewrite_is_covered(monkeypatch, tm
         return script
 
     monkeypatch.setattr(P, "ensure_concrete_hook", hook)
+    monkeypatch.setattr(P.Studio, "_length_before_voice", lambda self, script, pick, s: script)   # tested elsewhere
     real = factcheck.verify_claims
     monkeypatch.setattr(factcheck, "verify_claims", lambda *a, **k: (order.append("claims"), real(*a, **k))[1])
     monkeypatch.setattr(factcheck, "scrub", lambda *a, **k: pytest.fail("the source-less pass must not run"))

@@ -31,6 +31,7 @@ from .overlays import EMOJI_CREDIT, ChatMessage, build_overlays
 from .render import pick_cover, render_problems, render_video, split_sizes
 from .script import (
     HISTORY_RANGE,
+    STORY_VOICE_WPS,
     AUTO_STYLES,
     CARD_STYLES,
     DEFAULT_CAST,
@@ -46,6 +47,7 @@ from .script import (
     load_script,
     recent_violence_reason,
     split_scenes,
+    word_count,
     localize_metadata,
     review_script,
     translate_script,
@@ -166,9 +168,13 @@ def failure_kind(e: BaseException) -> str:
                   the place is given back for a later run;
     "error"     - anything else (a bug): the place stays used, so one broken place cannot stall the list;
     "headline"  - only the title/hook could not be supported (the narration was): the place is given back,
-                  since a later run writes a new headline for it."""
+                  since a later run writes a new headline for it;
+    "short"     - the story is too short for 45-60 s even after one rewrite: given back ONCE per place (a new
+                  script may be longer); the second short skip of the same place uses it up."""
     if headline_only(e):
         return "headline"
+    if isinstance(e, SkipTopic) and getattr(e, "short", False):
+        return "short"
     if isinstance(e, (SkipTopic, safety.UnsafeTopic)):
         return "transient" if getattr(e, "transient", False) else "rule"
     if isinstance(e, factcheck.NothingSupported):
@@ -361,6 +367,7 @@ def grounding_article(pick: Topic, lang: str = "en") -> tuple[str, str]:
     return factcheck.story_source(text, WRITER_SOURCE_CHARS), url
 
 
+SHORT_MARGIN = 3.0                  # the estimate is words/pace: skip before the voice only if it is under 45 - 3 s
 WRITER_SOURCE_CHARS = 5000          # how much of the article the script writer reads
 
 
@@ -607,6 +614,18 @@ class Studio:
         the claim up for good."""
         if not pick.key:
             return
+        if failure_kind(e) == "short" and pick.source == "list":
+            if not self.history.topic_used(pick.key):
+                return                               # already given back by the first settle of this very skip
+            meta = f"short_skip:{pick.key}"
+            if not self.history.get_meta(meta):
+                self.history.set_meta(meta, "1")
+                self.history.release_topic(pick.key)
+                log.info("Topic list: %s released once - a second short script uses it up",
+                         pick.place or pick.subject)
+            else:
+                self.history.finish_topic(pick.key)
+            return
         if isinstance(e, (Cancelled, KeyboardInterrupt)) or failure_kind(e) in ("transient", "headline"):
             if pick.source == "list" and self.history.topic_used(pick.key):
                 self.history.release_topic(pick.key)
@@ -621,6 +640,7 @@ class Studio:
         if pick is not None:
             self._settle_claim(pick, e)
         what = {"transient": "TRANSIENT failure (an outage, not the place) - the place is given back",
+                "short": "SHORT skip (too short for 45-60 s) - given back once per place",
                 "headline": "HEADLINE skip (only the title/hook was unsupported) - the place is given back",
                 "rule": "RULE skip - the place stays used",
                 "error": "ERROR - the place stays used"}[kind]
@@ -688,8 +708,40 @@ class Studio:
             total = round(speech.duration + END_PAD, 3)
             log.info("Voice-over after the length rewrite: %.1fs", total)
         if not lo <= total <= hi:
-            raise SkipTopic(f"video would run {total:.1f}s, outside {lo}-{hi}s after one rewrite")
+            raise SkipTopic(f"video would run {total:.1f}s, outside {lo}-{hi}s after one rewrite",
+                            short=total < lo)
         return script, speech, total
+
+    @staticmethod
+    def estimate_seconds(script: Script) -> float:
+        """The voice-over length of ``script`` BEFORE it is voiced: its words at the narrator's usual pace
+        (script.STORY_VOICE_WPS) plus the pause after the last word."""
+        return word_count(script.narration, script.language) / STORY_VOICE_WPS + END_PAD
+
+    def _length_before_voice(self, script: Script, pick: Topic, s: Settings) -> Script:
+        """Nov 20: the claim check removed so many sentences that the story ran 35.8 s - found out only AFTER
+        the voice-over (edge-tts, up to 3 x 60 s) had been made. The length is checked here, before the voice:
+        a script estimated under 45 s is rewritten ONCE (more of the SAME event, only what the article states),
+        checked against the article again, and re-measured. Still clearly short -> SkipTopic(short=True)."""
+        lo, hi = HISTORY_RANGE
+        est = self.estimate_seconds(script)
+        if est >= lo:
+            return script
+        log.info("Length before the voice: about %.0fs (%d words), under %d s; rewriting once from the article",
+                 est, word_count(script.narration, script.language), lo)
+        source = pick.source_full or pick.source_text
+        fixed = fit_story_length(self.llm, script, est - END_PAD, lo, hi,
+                                 source=factcheck.story_source(source, WRITER_SOURCE_CHARS))
+        if fixed is not None:
+            script = factcheck.ground(fixed, source, s)
+            # sentences the first check accepted and the rewrite left alone are not judged again
+            script = self._claim_check(script, pick, kinds=("narration",),
+                                       known=factcheck.accepted(pick.claim_reports))
+            est = self.estimate_seconds(script)
+            log.info("Length before the voice, after the rewrite and the claim check: about %.0fs", est)
+        if est < lo - SHORT_MARGIN:
+            raise SkipTopic(f"script would run about {est:.0f}s, under {lo} s after one rewrite", short=True)
+        return script
 
     # ------------------------------------------------------------------ script only
     def draft(self, topic: str | None = None, *, source: str | None = None, style: str | None = None,
@@ -792,6 +844,8 @@ class Studio:
                 why = recent_violence_reason(script, pick.source_full or pick.source_text)   # no recent tragedies
                 if why:
                     raise SkipTopic(f"topic centred on {why}")
+            if claim_checked and not user_chose_topic:
+                script = self._length_before_voice(script, pick, s)     # before the voice quota is spent
         except BaseException as e:
             if pick.idea_id:
                 self.history.release_idea(pick.idea_id)
