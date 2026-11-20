@@ -78,9 +78,10 @@ class SkipTopic(Exception):
     Handled like a travel-advisory skip: the autopilot moves on to another topic. ``transient``: the topic
     is fine but a service needed to check it is down (vision, the fact checker) - a later run tries it again."""
 
-    def __init__(self, message: str = "", transient: bool = False):
+    def __init__(self, message: str = "", transient: bool = False, short: bool = False):
         super().__init__(message)
         self.transient = transient
+        self.short = short            # the script is too short for the 45-60 s window (see failure_kind "short")
 
 
 @dataclass

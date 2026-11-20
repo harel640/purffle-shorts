@@ -96,6 +96,19 @@ class ImageUnusable(LLMError):
 
 
 VISION_MAX_SIDE = 1024
+# Cloudflare Workers AI vision: Mistral Small 3.1 24B (Apache-2.0, chat-completions format, no licence prompt).
+# @cf/llava-hf/llava-1.5-7b-hf was deprecated on 2026-11-20 (HTTP 410). Tried on real photos on Nov 20: 4/4 right.
+CF_VISION_MODEL = "@cf/mistralai/mistral-small-3.1-24b-instruct"
+
+
+def _cf_chat_text(body: dict) -> str:
+    """The model's text from a Cloudflare Workers AI reply: chat-completions ({"result": {"choices": [...]}}),
+    or the older {"result": {"response"|"description": ...}}."""
+    res = (body or {}).get("result") or {}
+    try:
+        return str(res["choices"][0]["message"]["content"] or "")
+    except (KeyError, IndexError, TypeError):
+        return str(res.get("response") or res.get("description") or "")
 # A backend's HTTP 400 that is about the picture (not the key, quota or model).
 _IMAGE_ERROR_RE = re.compile(r"(?i)(unsupported[^.]{0,30}(image|format)|could not decode|corrupt|"
                              r"invalid image|not a valid image|image format|cannot identify)")
@@ -627,6 +640,22 @@ class LLM:
                 model = ""
         return key, (model or "gemini-3.8-flash")
 
+    def _warn_vision_failure(self, backend: str, model: str, error: Exception) -> None:
+        """Say why a vision backend failed - once per backend and kind of failure in a run, at WARNING (Nov 20:
+        Cloudflare retired its LLaVA model, every vision call returned HTTP 410, and the reason was only logged
+        at DEBUG, so the log said just "no backend answered")."""
+        text = redact(str(error))
+        kind = "gone" if re.search(r"(?i)\b410\b|deprecated|no longer", text) else \
+            "timeout" if "timed out" in text.lower() else text[:40]
+        seen = self.__dict__.setdefault("_vision_warned", set())
+        if (backend, kind) in seen:
+            log.debug("%s vision failed: %s", backend.title(), text[:200])
+            return
+        seen.add((backend, kind))
+        log.warning("%s vision (%s) failed: %s%s", backend.title(), model, text[:300],
+                    " - the model is retired; set CLOUDFLARE_VISION_MODEL to a current one" if kind == "gone"
+                    and backend == "cloudflare" else "")
+
     def image_shows(self, image_path, subject: str) -> bool | None:
         """Ask a free vision model whether ``image_path`` clearly shows ``subject``. Tries Gemini (its current
         model) then Cloudflare Workers AI (LLaVA, using the image-gen credentials already configured). Returns
@@ -659,23 +688,27 @@ class LLM:
                 if v is not None:
                     return v
             except Exception as e:
-                log.debug("Gemini vision failed: %s", redact(e))
+                self._warn_vision_failure("gemini", model, e)
                 self.note_failure("gemini", e)
                 if isinstance(e, PermanentError) and _IMAGE_ERROR_RE.search(str(e)):
                     image_error = e
 
         acct, tok = self.settings.cloudflare_account_id, self.settings.cloudflare_api_token
         if acct and tok:
-            url = f"https://api.cloudflare.com/client/v4/accounts/{acct}/ai/run/@cf/llava-hf/llava-1.5-7b-hf"
+            model = (self.settings.cloudflare_vision_model or CF_VISION_MODEL).strip()
+            url = f"https://api.cloudflare.com/client/v4/accounts/{acct}/ai/run/{model}"
+            uri = f"data:{mime};base64,{base64.b64encode(raw).decode()}"
             try:
-                r = http().post(url, json={"image": list(raw), "prompt": question, "max_tokens": 8},
+                r = http().post(url, json={"messages": [{"role": "user", "content": [
+                                    {"type": "text", "text": question},
+                                    {"type": "image_url", "image_url": {"url": uri}}]}], "max_tokens": 8},
                                 headers={"Authorization": f"Bearer {tok}"}, timeout=90)
                 raise_for_status(r, "Cloudflare vision")
-                v = self._yes_no(str((r.json().get("result") or {}).get("description", "")))
+                v = self._yes_no(_cf_chat_text(r.json()))
                 if v is not None:
                     return v
             except Exception as e:
-                log.debug("Cloudflare vision failed: %s", redact(e))
+                self._warn_vision_failure("cloudflare", model, e)
                 if isinstance(e, PermanentError) and _IMAGE_ERROR_RE.search(str(e)):
                     image_error = e
         if image_error is not None:

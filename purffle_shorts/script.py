@@ -632,7 +632,9 @@ def _resize_story(llm, script: Script, subject: str, lo_words: int, hi_words: in
                   "that the draft already implies, adding no new facts")
                + ". Each new sentence moves the SAME story on - the person or event the draft follows, in "
                  "setup -> turning point -> payoff order - and is told as something that happened, in your own "
-                 "words. Never copy the source's wording and never describe like an encyclopedia (no \"the "
+                 "words. Say MORE about the SAME event: never start a new event, and never bring in other "
+                 "people, periods or places. Never copy the source's wording and never describe like an "
+                 "encyclopedia (no \"the "
                  "site contains\", \"comprises\", \"consists of\", \"spanning\", \"overall\", \"is known for\")")
     else:
         how = ("Shorten it by DELETING whole sentences or side clauses (repetition and side details first). "

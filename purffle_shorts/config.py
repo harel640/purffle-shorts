@@ -159,7 +159,8 @@ class Settings:
     # Before a real photo is used, a free vision model is asked "does this clearly show <subject>?" and the
     # photo is rejected on "no" — Commons titles lie (a "temple" file may be a dirt road or a monkey).
     vision_check: bool = True
-    vision_model: str = ""            # override the vision model; else the account's Gemini, then Cloudflare LLaVA
+    vision_model: str = ""            # override the vision model; else the account's Gemini, then Cloudflare
+    cloudflare_vision_model: str = ""  # override the Cloudflare vision model (default: llm.CF_VISION_MODEL)
     # Cloudflare Workers AI free tier is a daily "neuron" allocation shared by image generation and the vision
     # check. Keep a reserve for vision (≈2 videos) so AI image-gen can't starve it; gen falls back to real photos.
     cloudflare_daily_neurons: int = 10000
@@ -358,6 +359,7 @@ class Settings:
             cloudflare_api_token=_env("CLOUDFLARE_API_TOKEN"),
             vision_check=_bool(_env("VISION_CHECK", "true")),
             vision_model=_env("VISION_MODEL"),
+            cloudflare_vision_model=_env("CLOUDFLARE_VISION_MODEL"),
             cloudflare_daily_neurons=_int("CLOUDFLARE_DAILY_NEURONS", d.cloudflare_daily_neurons),
             cloudflare_vision_reserve=_int("CLOUDFLARE_VISION_RESERVE", d.cloudflare_vision_reserve),
             prefer_4k=_bool(_env("PREFER_4K", "false")),

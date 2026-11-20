@@ -78,8 +78,8 @@ def test_both_backends_receive_the_re_encoded_jpeg_not_the_mpo(monkeypatch, tmp_
         if "generativelanguage" in url:
             seen["gemini"] = base64.b64decode(json["messages"][0]["content"][1]["image_url"]["url"].split(",")[1])
             return _Resp(503, text="overloaded")
-        seen["cf"] = bytes(json["image"])
-        return _Resp(200, {"result": {"description": "Yes"}})
+        seen["cf"] = base64.b64decode(json["messages"][0]["content"][1]["image_url"]["url"].split(",")[1])
+        return _Resp(200, {"result": {"choices": [{"message": {"content": "Yes."}}]}})
 
     assert _llm(monkeypatch, post).image_shows(src, "a highland plain") is True
     for name in ("gemini", "cf"):
@@ -282,3 +282,40 @@ def test_no_ai_for_the_opener_the_closer_or_a_place_format_video(monkeypatch, tm
         with pytest.raises(M.SkipTopic, match="no vision-verified photo"):
             v.for_place_scenes(jobs, "Tabo", "India", tmp_path / "m", min_images=3, lat=32.2, lon=78.0,
                                article=article)
+
+
+# ------------------------------------------------------------------ Nov 20: Cloudflare retired LLaVA (HTTP 410)
+def test_cloudflare_vision_uses_the_current_chat_model_and_reads_its_reply(monkeypatch, tmp_path):
+    from purffle_shorts.llm import CF_VISION_MODEL
+    src, urls = _img(tmp_path / "p.jpg"), []
+
+    def post(self, url, json=None, headers=None, timeout=None):
+        urls.append(url)
+        return _Resp(200, {"result": {"choices": [{"message": {"content": "No."}}]}})
+
+    llm = _llm(monkeypatch, post, gemini=False)
+    assert llm.image_shows(src, "a temple") is False
+    assert urls == [f"https://api.cloudflare.com/client/v4/accounts/a/ai/run/{CF_VISION_MODEL}"]
+    assert "llava" not in CF_VISION_MODEL
+    llm.settings.cloudflare_vision_model = "@cf/x/other-vision"
+    assert llm.image_shows(src, "a temple") is False and urls[-1].endswith("/@cf/x/other-vision")
+
+
+def test_an_older_reply_shape_is_still_read():
+    from purffle_shorts.llm import _cf_chat_text
+    assert _cf_chat_text({"result": {"description": "Yes"}}) == "Yes"
+    assert _cf_chat_text({"result": {"response": "No"}}) == "No"
+    assert _cf_chat_text({"result": {}}) == "" and _cf_chat_text({}) == ""
+
+
+def test_a_retired_model_is_a_warning_not_a_debug_line(monkeypatch, tmp_path, caplog):
+    src = _img(tmp_path / "p.jpg")
+    gone = ('{"errors":[{"message":"AiError: Model has been deprecated: @cf/llava-hf/llava-1.5-7b-hf was '
+            'deprecated on 2026-11-20","code":5028}]}')
+    llm = _llm(monkeypatch, lambda self, url, json=None, headers=None, timeout=None: _Resp(410, text=gone),
+               gemini=False)
+    with caplog.at_level("WARNING", logger="purffle"):
+        assert llm.image_shows(src, "a temple") is None
+        assert llm.image_shows(src, "a temple") is None
+    warned = [r.getMessage() for r in caplog.records if "Cloudflare vision" in r.getMessage()]
+    assert len(warned) == 1 and "deprecated" in warned[0] and "CLOUDFLARE_VISION_MODEL" in warned[0]
