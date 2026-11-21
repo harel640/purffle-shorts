@@ -217,8 +217,8 @@ def test_the_opener_prefers_the_exterior_over_an_interior_or_a_statue(monkeypatc
     monkeypatch.setattr(v, "_fetch", lambda item, d, i: (setattr(item, "path", d / f"{item.id}.jpg") or item))
     monkeypatch.setattr(M, "_low_quality_image", lambda p: False)
     got = v._open_landmark_image(pool, M._terms("Dambulla cave temple"), "Dambulla Cave Temple", "Sri Lanka",
-                                 tmp_path, subject="the exterior of Dambulla Cave Temple")
-    assert got.id == "c3" and asked == ["the exterior of Dambulla Cave Temple"]
+                                 tmp_path, subject="Dambulla Cave Temple, seen from outside")
+    assert got.id == "c3" and asked == ["Dambulla Cave Temple, seen from outside"]
 
 
 def test_the_opener_is_vision_checked_as_the_exterior_of_the_place(monkeypatch, tmp_path):
@@ -226,12 +226,12 @@ def test_the_opener_is_vision_checked_as_the_exterior_of_the_place(monkeypatch, 
     v, _ = _visuals(monkeypatch, shows=lambda s: asked.append(s) or True)
     v.for_place_scenes([("Dambulla", "", False)] * 3, "Dambulla Cave Temple", "Sri Lanka", tmp_path / "m",
                        min_images=3, lat=7.8, lon=80.6)
-    assert asked[0] == "the exterior of Dambulla Cave Temple"
+    assert asked[0] == "Dambulla Cave Temple, seen from outside"
 
 
 def test_an_opener_that_is_not_the_exterior_is_rejected_and_the_next_tried(monkeypatch, tmp_path):
-    v, _ = _visuals(monkeypatch, shows=lambda s: not s.startswith("the exterior") or False)
-    # nothing ever shows "the exterior": the opener can't be verified, so the topic is skipped, not faked
+    v, _ = _visuals(monkeypatch, shows=lambda s: not s.endswith("seen from outside") or False)
+    # nothing is ever confirmed "seen from outside": the opener can't be verified, so the topic is skipped, not faked
     with pytest.raises(M.SkipTopic, match="no vision-verified photo"):
         v.for_place_scenes([("Dambulla", "", False)] * 3, "Dambulla Cave Temple", "Sri Lanka", tmp_path / "m",
                            min_images=3, lat=7.8, lon=80.6)

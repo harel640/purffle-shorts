@@ -611,13 +611,20 @@ class LLM:
         return None
 
     def _vision_question(self, subject: str) -> str:
-        # One question, one call: it must be a PHOTOGRAPH of the place (Vigan, Nov 12: the town's seal passed as
-        # "shows Vigan"), and the place must be its main subject.
-        return (f'Is this a real photograph of a place, and does its main subject clearly show {subject}? A camera '
-                f'photo of a building, landscape, interior, mural, carving or statue counts as a photograph. Answer '
-                f'"no" if the image itself is a seal, logo, emblem, coat of arms, flag, sign, map, chart, diagram or '
-                f'other flat graphic, or if it shows a beach, a street, an animal, a person or an unrelated place '
-                f'instead of {subject}. Answer only "yes" or "no".')
+        # One question, one call: it must be a PHOTOGRAPH (Vigan, Nov 12: the town's seal passed as "shows
+        # Vigan") that is CONSISTENT with the place. Nov 21 calibration (29 real Commons photos of Bujang Valley,
+        # Fort Zeelandia, Pingyao and Gwalior Fort, 13 clearly wrong images; Cloudflare Mistral Small 3.1): the
+        # old "does its main subject clearly show <place>" rejected 45% of the real photos - a model cannot
+        # know what an obscure ruin looks like - and accepted none of the wrong ones. This wording: 7% false
+        # rejects, 0% false accepts. The photo pool itself is place-accurate (geotagged within 5 km, or a title
+        # naming the place), so the check guards against graphics and other places, not look-alikes.
+        return (f'Could this plausibly be a real photograph of {subject} - the place itself, a part of it or a view '
+                f'at it? Answer "yes" if it is a camera photograph (colour or old black-and-white) of a building, '
+                f'ruin, wall, gate, tower, street, landscape, interior, mural, carving or statue that is consistent '
+                f'with {subject}. Answer "no" if the image is not a photograph (a seal, logo, emblem, coat of arms, '
+                f'flag, sign, map, chart, diagram, drawing, painting or engraving), or if it clearly shows a '
+                f'different, recognisable place or landmark, or mainly an animal or a person. Answer only "yes" '
+                f'or "no".')
 
     def vision_available(self) -> bool:
         """True when a vision backend is configured (so a None result means 'the call failed', not 'no model')."""

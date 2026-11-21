@@ -26,7 +26,7 @@ from .config import Settings
 from .history import PLACE_REUSE_DAYS, History, now_iso, place_recently_used  # noqa: F401 (re-exported)
 from .llm import LLM, LLMConfigError, LLMError
 from . import factcheck, safety
-from .media import MediaItem, NeuronBudget, SkipTopic, Visuals, background_item, resolve_place
+from .media import MediaItem, NeuronBudget, SkipTopic, Visuals, background_item, event_scene, resolve_place
 from .overlays import EMOJI_CREDIT, ChatMessage, build_overlays
 from .render import pick_cover, render_problems, render_video, split_sizes
 from .script import (
@@ -170,11 +170,15 @@ def failure_kind(e: BaseException) -> str:
     "headline"  - only the title/hook could not be supported (the narration was): the place is given back,
                   since a later run writes a new headline for it;
     "short"     - the story is too short for 45-60 s even after one rewrite: given back ONCE per place (a new
-                  script may be longer); the second short skip of the same place uses it up."""
+                  script may be longer); the second short skip of the same place uses it up;
+    "photos"    - no vision-verified photo was left for a scene: given back ONCE per place too (a new script
+                  asks for other scenes)."""
     if headline_only(e):
         return "headline"
     if isinstance(e, SkipTopic) and getattr(e, "short", False):
         return "short"
+    if isinstance(e, SkipTopic) and getattr(e, "photos", False):
+        return "photos"
     if isinstance(e, (SkipTopic, safety.UnsafeTopic)):
         return "transient" if getattr(e, "transient", False) else "rule"
     if isinstance(e, factcheck.NothingSupported):
@@ -191,6 +195,10 @@ def failure_kind(e: BaseException) -> str:
             return "transient"
         x = x.__cause__ or x.__context__
     return "error"
+
+
+# Skips that give a listed place back ONCE (a new script may succeed); the meta key that counts it.
+GIVE_BACK_ONCE = {"short": "short_skip", "photos": "photo_skip"}
 
 
 def headline_only(e: BaseException) -> bool:
@@ -250,6 +258,15 @@ def plan_ai_scenes(historical: list[bool]) -> list[bool]:
             break
         hist[i] = False
     return hist
+
+
+def ai_scene_flags(scenes, modern: list[bool], style: str) -> list[bool]:
+    """Which scenes are AI illustrations: a past scene (the writer's ``historical`` flag) or an EVENT scene (a
+    siege, a battle, a shortage, an arrival: no photo shows it) that is not modern (before 1900), in the
+    "history" format only, within plan_ai_scenes' caps. When the AI budget runs out the scene falls back to a
+    real photo, checked against the place itself (media.visible_subject)."""
+    return plan_ai_scenes([(bool(sc.historical) or event_scene(sc.search_query)) and style == "history" and not m
+                           for sc, m in zip(scenes, modern)])
 
 
 TITLE_MAX = 68           # a place Short's whole title: a headline of up to 60 characters + " #shorts"
@@ -614,15 +631,16 @@ class Studio:
         the claim up for good."""
         if not pick.key:
             return
-        if failure_kind(e) == "short" and pick.source == "list":
+        kind = failure_kind(e)
+        if kind in GIVE_BACK_ONCE and pick.source == "list":
             if not self.history.topic_used(pick.key):
                 return                               # already given back by the first settle of this very skip
-            meta = f"short_skip:{pick.key}"
+            meta = f"{GIVE_BACK_ONCE[kind]}:{pick.key}"
             if not self.history.get_meta(meta):
                 self.history.set_meta(meta, "1")
                 self.history.release_topic(pick.key)
-                log.info("Topic list: %s released once - a second short script uses it up",
-                         pick.place or pick.subject)
+                log.info("Topic list: %s released once - a second %s skip uses it up",
+                         pick.place or pick.subject, kind)
             else:
                 self.history.finish_topic(pick.key)
             return
@@ -641,6 +659,7 @@ class Studio:
             self._settle_claim(pick, e)
         what = {"transient": "TRANSIENT failure (an outage, not the place) - the place is given back",
                 "short": "SHORT skip (too short for 45-60 s) - given back once per place",
+                "photos": "PHOTO skip (no vision-verified photo left) - given back once per place",
                 "headline": "HEADLINE skip (only the title/hook was unsupported) - the place is given back",
                 "rule": "RULE skip - the place stays used",
                 "error": "ERROR - the place stays used"}[kind]
@@ -1055,8 +1074,7 @@ class Studio:
                     # AI past scenes only for the "history" style, and kept grounded: first & last scene real,
                     # at least ~40% of scenes real, at most 5 AI scenes (see plan_ai_scenes).
                     modern = modern_scenes([sc.narration for sc in script.scenes], f"{place} {country}")
-                    hist = plan_ai_scenes([bool(sc.historical) and script.style == "history" and not m
-                                           for sc, m in zip(script.scenes, modern)])
+                    hist = ai_scene_flags(script.scenes, modern, script.style)
                     scene_jobs = [(sc.search_query, sc.image_prompt, h) for sc, h in zip(script.scenes, hist)]
                     if script.scenes:
                         log.info("Scenes: %d total, %d AI, %d real photos (first & last real)",

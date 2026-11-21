@@ -34,8 +34,10 @@ def test_a_commons_seal_is_dropped_before_download():
 
 def test_the_vision_check_asks_for_a_photograph_of_the_place():
     q = LLM._vision_question(None, "Vigan, Philippines")          # needs no configured provider
-    assert "real photograph of a place" in q and "seal" in q and "logo" in q and "coat of arms" in q
-    assert "flag" in q and q.count("Vigan, Philippines") == 2 and q.endswith('Answer only "yes" or "no".')
+    assert "plausibly be a real photograph of Vigan, Philippines" in q
+    assert "seal" in q and "logo" in q and "coat of arms" in q and "map" in q and "engraving" in q
+    assert "flag" in q and q.count("Vigan, Philippines") == 2 and q.endswith('"yes" or "no".')
+    assert "different, recognisable place" in q        # another landmark is still a "no"
     assert "mural" in q and "statue" in q          # photos of murals and statues (Mogao) still count
 
 
