@@ -78,10 +78,11 @@ class SkipTopic(Exception):
     Handled like a travel-advisory skip: the autopilot moves on to another topic. ``transient``: the topic
     is fine but a service needed to check it is down (vision, the fact checker) - a later run tries it again."""
 
-    def __init__(self, message: str = "", transient: bool = False, short: bool = False):
+    def __init__(self, message: str = "", transient: bool = False, short: bool = False, photos: bool = False):
         super().__init__(message)
         self.transient = transient
         self.short = short            # the script is too short for the 45-60 s window (see failure_kind "short")
+        self.photos = photos          # no vision-verified photo was left for a scene (failure_kind "photos")
 
 
 @dataclass
@@ -744,12 +745,31 @@ def _stem(word: str) -> str:
     return w
 
 
+# A scene whose query names an EVENT ("Koxinga siege Fort Zeelandia", "Fort Zeelandia water shortage") has no
+# photo that shows it: the photo is checked against the place itself (Nov 21: 12 Fort Zeelandia photos were
+# rejected for not showing a siege or a water shortage).
+EVENT_RE = re.compile(
+    r"\b(?:sieges?|besieg\w*|battles?|wars?|warfare|invasions?|invad\w*|attacks?|raids?|sack(?:ed|ing)?|"
+    r"shortages?|famine|droughts?|floods?|flooding|fires?|blaze|earthquakes?|quakes?|arrivals?|arriv\w+|"
+    r"landings?|surrender\w*|captur\w*|conquests?|conquer\w*|rebellions?|revolts?|uprisings?|massacres?|"
+    r"plagues?|epidemics?|treaty|treaties|coronations?|weddings?|marriages?|funerals?|deaths?|exiles?|"
+    r"escapes?|retreats?|blockades?|bombardments?|negotiations?|voyages?|expeditions?|defen[cs]es?|defend\w*|"
+    r"assaults?|ambush\w*|executions?|betray\w*|collapse[ds]?|destruction|destroy\w*|abandon\w*)\b", re.I)
+
+
+def event_scene(query: str) -> bool:
+    """True when a scene's search query names an event (a siege, a battle, a shortage, an arrival ...)."""
+    return bool(EVENT_RE.search(query or ""))
+
+
 def visible_subject(query: str, place: str, pool: list[MediaItem]) -> str:
     """What a photo for a middle scene must show, for the vision check: the scene's query without the names
     no photo of the place carries - people ("Aurel Stein Mogao Caves" -> "Mogao Caves"; the strict photo
     question rejected every cave photo for it, Nov 12). A capitalised word stays only when some pool photo's
     title/categories contain it. When names were dropped and no landmark name is left ("Stein donation Wang
     restoration"), the photo must simply show the place; a plain description ("worship hall interior") stays."""
+    if place and event_scene(query):
+        return place                                   # an event is not visible: the photo must show the place
     vocab = {w.lower() for it in pool for w in re.findall(r"[A-Za-z]+", f"{it.text} {it.query}")}
     words = (query or "").split()
     kept = [w for w in words if not w[:1].isupper() or re.sub(r"[^a-z]", "", w.lower()) in vocab]
@@ -1327,7 +1347,9 @@ class Visuals:
         prev_key, consec = None, 0
         last = len(jobs) - 1
         built = built_year(article)
-        exterior_subject = f"the exterior of {place}"           # what the opening scene must show, checked in pixels
+        # What the opening scene must show, checked in pixels. Nov 21 calibration: "the exterior of <place>"
+        # was rejected for 17% of real photos even with the calibrated question, "<place>, seen from outside" 7%.
+        exterior_subject = f"{place}, seen from outside"
         statues = 0                                            # scenes already showing a statue (max MAX_STATUE_SCENES)
         for i, (q, prompt, historical) in enumerate(jobs):
             is_landmark = i == 0 or i == last                  # opener & closer must show the main landmark
@@ -1376,7 +1398,8 @@ class Visuals:
                     item = self._historical_image(prompt or q, dest_dir, i, arch=arch, clothing=clothing)
                 if item is None:
                     raise SkipTopic(f"no vision-verified photo left for scene {i + 1} of {place} "
-                                    f"(pool of {len(pool)} used up) - skipping rather than use an unverified one")
+                                    f"(pool of {len(pool)} used up) - skipping rather than use an unverified one",
+                                    photos=True)
             consec = consec + 1 if item.key == prev_key else 1
             prev_key = item.key
             if item.source == "wikimedia":                     # remember its subject so later scenes differ

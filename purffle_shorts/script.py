@@ -916,6 +916,27 @@ def _article_date(sentence: str, article: str) -> tuple[str, str]:
     return "", ""
 
 
+# Nov 21: "Kellie-Smith died of pneumonia during a short trip to Lisbon in 1926" skipped Kellie's Castle as
+# recent violence. A death from illness, disease, old age or natural causes is not violence; war, executions,
+# massacres, riots, protests and disasters with casualties still are.
+_DEATH_ONLY_RE = re.compile(r"^(?:died|dies|deaths?|dead)$", re.I)
+_NATURAL_DEATH_RE = re.compile(
+    r"\b(?:of|from)\s+(?:an?\s+|the\s+|his\s+|her\s+)?(?:illness|sickness|disease|pneumonia|fever|malaria|"
+    r"cancer|tuberculosis|consumption|typhoid|influenza|flu|heart (?:attack|failure|disease)|stroke|old age|"
+    r"natural causes|age|infection|complications)\b|\b(?:in (?:his|her) sleep|peacefully|of old age|"
+    r"after (?:a|an) (?:long |short |brief )?illness)\b", re.I)
+_MASS_DEATH_RE = re.compile(r"\b(?:epidemic|pandemic|outbreak|plague|famine|hundreds|thousands|millions|"
+                            r"dozens|many people|victims|toll)\b", re.I)
+
+
+def natural_death(sentence: str) -> bool:
+    """True when the only "violence" in ``sentence`` is one person's death from illness, disease, old age or
+    natural causes (no killing, war or disaster words, no mass deaths)."""
+    words = [m.group(0) for m in _VIOLENCE_RE.finditer(sentence)]
+    return (bool(words) and all(_DEATH_ONLY_RE.match(w) for w in words)
+            and bool(_NATURAL_DEATH_RE.search(sentence)) and not _MASS_DEATH_RE.search(sentence))
+
+
 def recent_violence_reason(script: Script, article: str = "") -> str:
     """Why a script is about recent deaths, protests, riots or political violence (1900 or later), or "": the
     channel tells stories of the deep past, not of recent suffering. Each sentence of the title, hook and
@@ -932,7 +953,7 @@ def recent_violence_reason(script: Script, article: str = "") -> str:
     sentences = [x for x in re.split(r"(?<=[.!?;])\s+|\n", text) if x.strip()]
     for i, sentence in enumerate(sentences):
         v = _VIOLENCE_RE.search(sentence)
-        if not v:
+        if not v or natural_death(sentence):
             continue
         own = _date_kind(sentence)
         if own == "recent":
