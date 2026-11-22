@@ -29,27 +29,49 @@ CF_FLUX_NEURONS = 720
 
 
 class NeuronBudget:
-    """Tracks Cloudflare Workers AI neurons spent on image generation today (persisted in history meta) and
-    keeps a reserve so the vision check always has allocation. Image generation stops at the reserve."""
+    """Tracks the Cloudflare Workers AI neurons spent today - image generation AND every vision call (Nov 22:
+    only images were counted, and the vision calls alone used the day's 10,000 up) - persisted in history meta
+    under the UTC date (Cloudflare's docs: the free allocation resets at 00:00 UTC). Image generation stops at
+    ``reserve`` so the vision check keeps allocation; vision may use all of it. ``run`` holds this run's
+    spending per kind, for the end-of-run log line."""
 
     def __init__(self, history, daily: int, reserve: int):
         self.history, self.daily, self.reserve = history, daily, reserve
         self.key = f"cf_neurons:{datetime.now(timezone.utc):%Y-%m-%d}"
+        self.run: dict[str, float] = {}
+        self.calls: dict[str, int] = {}
+        self.exhausted = False                 # Cloudflare itself said the allocation is used up this run
 
-    def _spent(self) -> int:
+    def _spent(self) -> float:
         try:
-            return int(self.history.get_meta(self.key) or 0)
+            return float(self.history.get_meta(self.key) or 0)
         except (ValueError, TypeError):
-            return 0
+            return 0.0
 
-    def can_spend(self, cost: int) -> bool:
-        return self._spent() + cost <= max(0, self.daily - self.reserve)
+    def spent_today(self) -> float:
+        return self._spent()
 
-    def record(self, cost: int) -> None:
+    def can_spend(self, cost: float, kind: str = "image") -> bool:
+        limit = self.daily - (self.reserve if kind == "image" else 0)
+        return not self.exhausted and self._spent() + cost <= max(0, limit)
+
+    def record(self, cost: float, kind: str = "image") -> None:
+        self.run[kind] = self.run.get(kind, 0.0) + cost
+        self.calls[kind] = self.calls.get(kind, 0) + 1
         try:
-            self.history.set_meta(self.key, str(self._spent() + cost))
+            self.history.set_meta(self.key, f"{self._spent() + cost:.1f}")
         except Exception:  # accounting is best-effort; never fail a render over it
             pass
+
+    def note_exhausted(self) -> None:
+        self.exhausted = True
+
+    def summary(self) -> str:
+        parts = [f"{k} {self.run[k]:.0f} ({self.calls.get(k, 0)} call{'s' * (self.calls.get(k, 0) != 1)})"
+                 for k in sorted(self.run)]
+        return (f"Cloudflare neurons this run: {sum(self.run.values()):.0f}"
+                f"{' - ' + ', '.join(parts) if parts else ''}; today (UTC): {self._spent():.0f} of {self.daily}"
+                f"{' - Cloudflare says the allocation is used up' if self.exhausted else ''}")
 
 VIDEO_EXT = {".mp4", ".mov", ".m4v", ".webm", ".mkv"}
 IMAGE_EXT = {".jpg", ".jpeg", ".png", ".webp"}
@@ -881,6 +903,7 @@ class Visuals:
         self._vision_cache: dict[tuple[str, str], bool | None] = {}
         self._vision_unavailable = False              # set when the check is configured but no model answered
         self._vision_answered = 0                     # images a backend gave a yes/no for
+        self._local_vision_said = False               # the switch to the local CLIP check was logged
         self._vision_streak = 0                       # consecutive images no backend answered for
         self._reuse_rejected: set[str] = set()        # pool photos the last-resort picker already turned down
         self._look_cache: dict = {}                   # (place, country, article) -> {architecture, clothing}
@@ -1052,6 +1075,8 @@ class Visuals:
         except Exception as e:
             log.debug("vision check errored (%s)", redact(e))
             verdict = None
+        if verdict is None:                                   # no cloud backend answered: the local check
+            verdict = self._local_check(item, subject)
         if verdict is True or verdict is False:               # only an explicit yes/no counts as an answer
             self._vision_cache[ck] = verdict
             self._vision_answered += 1
@@ -1068,6 +1093,32 @@ class Visuals:
         if (self._vision_answered == 0 and self._vision_streak >= VISION_GIVE_UP_FRESH)                 or self._vision_streak >= VISION_GIVE_UP_STREAK:
             self._vision_unavailable = True
         return NO_ANSWER
+
+    def _local_check(self, item: MediaItem, subject: str) -> bool | None:
+        """The fallback that never runs out (Nov 22: Cloudflare's neurons were used up and Gemini timed out, so
+        no photo could be checked): CLIP on the CPU says whether the picture is a PHOTOGRAPH OF A PLACE (not a
+        map, logo, emblem, drawing, engraving, food, a person or an animal) - and it is trusted only for a
+        photo that is place-accurate by provenance (geotagged within 5 km, or its title names the place),
+        since CLIP cannot tell one fort from another. None when the model is not installed."""
+        from . import clip_local
+        if not clip_local.available():
+            return None
+        if not getattr(self, "_local_vision_said", False):
+            self._local_vision_said = True
+            log.warning("Vision: no cloud backend answered; checking photos with the local CLIP model "
+                        "(photo-of-a-place category + place-accurate provenance)")
+        name = item.extra.get("wiki_title") or item.key
+        where = item.extra.get("place_accurate")
+        if not where:
+            log.info("Vision (local): %s is not place-accurate (not geotagged near the place, title does not "
+                     "name it) - the local check cannot vouch for it", name)
+            return False
+        ok, why = clip_local.photo_of_a_place(item.path, exterior=subject.endswith("seen from outside"))
+        if ok is None:
+            return None
+        log.info("Vision (local): %s %s for %r - %s, %s", name, "accepted" if ok else "rejected", subject, why,
+                 where)
+        return ok
 
     def _claim_wiki(self, cands: list[MediaItem], query: str, script_terms: set[str],
                     avoid: set[str] | None = None) -> MediaItem | None:
@@ -1245,6 +1296,7 @@ class Visuals:
                 for it in geosearch_images(lat, lon, 5000):
                     if it.key not in seen:
                         seen.add(it.key)
+                        it.extra["place_accurate"] = "geotagged within 5 km"
                         pool.append(it)
                         near += 1
             except Exception as e:
@@ -1257,6 +1309,7 @@ class Visuals:
                     if why:                                    # same name, another place (Shey Palace != Shey Gompa)
                         log.info("Wikimedia: skipped %r (%s)", it.extra.get("wiki_title") or it.id, why)
                         continue
+                    it.extra["place_accurate"] = "title names the place"
                     pool.append(it)
         log.info("Wikimedia: %d place-accurate image(s) for %s (%d within 5 km%s)", len(pool), pc or place,
                  near, "" if lat is not None else "; no coordinates, titles only")

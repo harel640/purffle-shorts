@@ -544,6 +544,7 @@ class Studio:
             return None
         if self._llm is None:
             self._llm = LLM(self.s)
+            self._llm.neurons = getattr(self, "_budget", None)
             log.info("LLM: %s%s", self._llm.label,
                      f" (fallbacks: {', '.join(str(p) for p in self._llm.providers[1:])})"
                      if len(self._llm.providers) > 1 else "")
@@ -890,6 +891,7 @@ class Studio:
         languages = s.also_languages if languages is None else languages
         state: dict = {}
         pick: Topic | None = None
+        self._new_budget()
         writes = script is None and not script_file
         reviews = writes and not s.offline and s.script_review != "off"
         self._begin((["topic", "script"] if writes else []) + (["review"] if reviews else [])
@@ -949,6 +951,21 @@ class Studio:
                         detail=redact(e))
             return Result(False, folder=state.get("folder"), status="failed", error=redact(e),
                           seconds=time.time() - t0)
+        finally:
+            if self._budget is not None:
+                log.info(self._budget.summary())
+
+    def _new_budget(self) -> NeuronBudget | None:
+        """This run's Cloudflare neuron budget (images and vision), shared with the LLM's vision check."""
+        s = self.s
+        self._budget = (NeuronBudget(self.history, s.cloudflare_daily_neurons, s.cloudflare_vision_reserve)
+                        if s.cloudflare_account_id and s.cloudflare_api_token else None)
+        try:
+            if getattr(self, "_llm", None) is not None:
+                self._llm.neurons = self._budget
+        except AttributeError:                                # a stand-in LLM (tests) that takes no attributes
+            pass
+        return self._budget
 
     def produce(self, script: Script, pick: Topic, writer: str, *, upload: bool, t0: float | None = None,
                 languages: list[str] | None = None, media_map: dict[tuple[int, int], MediaItem] | None = None,
@@ -1062,8 +1079,7 @@ class Studio:
                 credits = set(credits or ())
             else:
                 # split layout: the footage fills the top half, so search for the shape of that half
-                budget = (NeuronBudget(self.history, s.cloudflare_daily_neurons, s.cloudflare_vision_reserve)
-                          if s.cloudflare_account_id and s.cloudflare_api_token else None)
+                budget = getattr(self, "_budget", None) or self._new_budget()
                 visuals = Visuals(replace(s, resolution=split_sizes(s)[0]) if split else s,
                                   self.history.used_media(), llm=self.llm, budget=budget)
                 if place_locked and place:
