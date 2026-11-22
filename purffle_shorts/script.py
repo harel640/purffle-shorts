@@ -881,13 +881,11 @@ def _thread_tokens(text: str) -> set[str]:
     return {_stem(w) for w in re.findall(r"[a-z]{4,}", text.lower()) if w not in _THREAD_STOP}
 
 
-def _article_date(sentence: str, article: str) -> tuple[str, str]:
-    """When the article dates the event a script sentence tells: ("recent"|"old"|"", evidence). The article's
-    sentences about it are those naming violence that share the most words with the script's sentence; the
-    date is taken from that sentence or, failing that, from the sentences before it in the same paragraph
-    (Wikipedia often dates a passage once: "part of the breakaway state (1959-1963) ... soldiers opened fire")."""
+def _article_hits(sentence: str, article: str) -> list[tuple[str, list[str]]]:
+    """The article's sentences that tell the same violence or death as ``sentence``: those naming it that share
+    the most words (at least 2) with it, each with up to 4 sentences before it in its paragraph."""
     if not article:
-        return "", ""
+        return []
     mine = _thread_tokens(sentence)
     best, hits = 0, []
     for para in re.split(r"\n\s*\n|\n(?==)", article):
@@ -901,6 +899,15 @@ def _article_date(sentence: str, article: str) -> tuple[str, str]:
             if shared > best:
                 best, hits = shared, []
             hits.append((s, sents[max(0, i - 4):i]))
+    return hits
+
+
+def _article_date(sentence: str, article: str) -> tuple[str, str]:
+    """When the article dates the event a script sentence tells: ("recent"|"old"|"", evidence). The article's
+    sentences about it are those naming violence that share the most words with the script's sentence; the
+    date is taken from that sentence or, failing that, from the sentences before it in the same paragraph
+    (Wikipedia often dates a passage once: "part of the breakaway state (1959-1963) ... soldiers opened fire")."""
+    hits = _article_hits(sentence, article)
     kinds = []
     for s, before in hits:
         for ctx in [s, *reversed(before)]:
@@ -925,6 +932,9 @@ _NATURAL_DEATH_RE = re.compile(
     r"cancer|tuberculosis|consumption|typhoid|influenza|flu|heart (?:attack|failure|disease)|stroke|old age|"
     r"natural causes|age|infection|complications)\b|\b(?:in (?:his|her) sleep|peacefully|of old age|"
     r"after (?:a|an) (?:long |short |brief )?illness)\b", re.I)
+_DEATH_WORD_RE = re.compile(r"\b(?:died|dies|deaths?|dead|deadly|kill\w*|executed|executions?|casualties|"
+                            r"massacre\w*|slaughter\w*|murder\w*|perished|lost (?:their|his|her) li(?:fe|ves))\b",
+                            re.I)
 _MASS_DEATH_RE = re.compile(r"\b(?:epidemic|pandemic|outbreak|plague|famine|hundreds|thousands|millions|"
                             r"dozens|many people|victims|toll)\b", re.I)
 
@@ -935,6 +945,31 @@ def natural_death(sentence: str) -> bool:
     words = [m.group(0) for m in _VIOLENCE_RE.finditer(sentence)]
     return (bool(words) and all(_DEATH_ONLY_RE.match(w) for w in words)
             and bool(_NATURAL_DEATH_RE.search(sentence)) and not _MASS_DEATH_RE.search(sentence))
+
+
+def _deaths_only(sentence: str) -> bool:
+    """True when the only violence words in ``sentence`` are plain death words (died, dies, death, dead) and it
+    names no mass deaths - a sentence that could be telling one person's natural death."""
+    words = [m.group(0) for m in _VIOLENCE_RE.finditer(sentence)]
+    return bool(words) and all(_DEATH_ONLY_RE.match(w) for w in words) and not _MASS_DEATH_RE.search(sentence)
+
+
+def _article_natural_death(sentence: str, told: str, article: str) -> str:
+    """Nov 22: the hook "Dream dies, ruin lives" and the opening "By 1926 the Scottish planter died" name no
+    illness, but the article sentence that tells that death does: "Kellie-Smith died at the age of 56 of
+    pneumonia ... in 1926". When a plain death sentence of the script is matched (by its own words, else by
+    everything the script says about deaths) to article sentences that ALL tell a natural death, that article
+    sentence is returned and the death is not violence. Any matched killing, war or mass death -> "" (blocks)."""
+    if not article or not _deaths_only(sentence):
+        return ""
+    for probe in (sentence, told):
+        hits = [s for s, _ in _article_hits(probe, article)]
+        if hits:
+            return hits[0] if all(natural_death(s) for s in hits) else ""
+    # Nothing matched by words ("Dream dies, ruin lives"): the script is grounded in the article, so when every
+    # death the article tells is a natural one, a plain "died" in the script can only be one of them.
+    told_deaths = [s for s in re.split(r"(?<=[.!?])\s+|\n", article) if _DEATH_WORD_RE.search(s)]
+    return told_deaths[0] if told_deaths and all(natural_death(s) for s in told_deaths) else ""
 
 
 def recent_violence_reason(script: Script, article: str = "") -> str:
@@ -951,9 +986,10 @@ def recent_violence_reason(script: Script, article: str = "") -> str:
     resulting in deaths" is not assumed to be old."""
     text = "\n".join([script.title, script.hook_text] + [sc.narration for sc in script.scenes])
     sentences = [x for x in re.split(r"(?<=[.!?;])\s+|\n", text) if x.strip()]
+    deaths = " ".join(x for x in sentences if _VIOLENCE_RE.search(x))
     for i, sentence in enumerate(sentences):
         v = _VIOLENCE_RE.search(sentence)
-        if not v or natural_death(sentence):
+        if not v or natural_death(sentence) or _article_natural_death(sentence, deaths, article):
             continue
         own = _date_kind(sentence)
         if own == "recent":
@@ -965,8 +1001,7 @@ def recent_violence_reason(script: Script, article: str = "") -> str:
         if not kind:
             # A short line ("A protest turned deadly") shares too few words with the article: date the event
             # from everything the script says about the violence.
-            told = " ".join(x for x in sentences if _VIOLENCE_RE.search(x))
-            kind, ev = _article_date(told, article)
+            kind, ev = _article_date(deaths, article)
         if kind == "recent":
             return (f"recent violence or deaths: {v.group(0)!r} in \"{sentence.strip()[:70]}\" - the article "
                     f"dates it: \"{ev}\"")

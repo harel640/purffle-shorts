@@ -99,7 +99,7 @@ def test_gemini_calls_use_a_30s_timeout():
     assert L.GEMINI_TIMEOUT == 30.0
 
 
-def test_vision_skips_gemini_once_its_circuit_is_open(monkeypatch, tmp_path):
+def test_vision_skips_gemini_once_its_vision_circuit_is_open(monkeypatch, tmp_path):
     from PIL import Image
     img = tmp_path / "x.jpg"
     Image.new("RGB", (32, 32)).save(img)
@@ -119,10 +119,38 @@ def test_vision_skips_gemini_once_its_circuit_is_open(monkeypatch, tmp_path):
     monkeypatch.setenv("GEMINI_API_KEY", "k")
     llm = L.LLM.__new__(L.LLM)
     llm.settings = Settings(vision_model="gemini-x", cloudflare_account_id="a", cloudflare_api_token="t")
-    llm.note_failure("gemini", RuntimeError("HTTP 503"))
-    llm.note_failure("gemini", RuntimeError("HTTP 503"))
+    llm.note_failure(L.GEMINI_VISION, RuntimeError("HTTP 503"))
+    llm.note_failure(L.GEMINI_VISION, RuntimeError("HTTP 503"))
     assert llm.image_shows(img, "a temple") is True
     assert all("generativelanguage" not in u for u, _ in urls)   # straight to Cloudflare
+
+
+def test_a_gemini_text_timeout_does_not_switch_gemini_vision_off(monkeypatch, tmp_path):
+    """Nov 22: two Gemini text timeouts opened the "gemini" circuit, and vision skipped Gemini too."""
+    from PIL import Image
+    img = tmp_path / "x.jpg"
+    Image.new("RGB", (32, 32)).save(img)
+    urls = []
+
+    class Sess:
+        def post(self, url, json=None, headers=None, timeout=None):
+            urls.append(url)
+            class R:
+                status_code = 200
+                text = ""
+                def json(self_):
+                    return {"choices": [{"message": {"content": "Yes"}}]}
+            return R()
+
+    monkeypatch.setattr(L, "http", lambda: Sess())
+    monkeypatch.setenv("GEMINI_API_KEY", "k")
+    llm = L.LLM.__new__(L.LLM)
+    llm.settings = Settings(vision_model="gemini-x")
+    llm.note_failure("gemini", RuntimeError("Read timed out"))
+    llm.note_failure("gemini", RuntimeError("Read timed out"))
+    assert llm.circuit_open("gemini") and not llm.circuit_open(L.GEMINI_VISION)
+    assert llm.image_shows(img, "a temple") is True
+    assert any("generativelanguage" in u for u in urls)
 
 
 # ------------------------------------------------------------------ 3. nothing gory in an AI prompt

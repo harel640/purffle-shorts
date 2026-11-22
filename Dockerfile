@@ -84,6 +84,27 @@ for dest, (url, want) in files.items():
         raise SystemExit(f"{dest}: sha256 {h.hexdigest()} != pinned {want}")
 print("depth model and ambience ok")
 EOF
+
+# Local vision fallback (used only when every cloud vision backend is unavailable): CLIP ViT-B/32 - the
+# vision tower of openai/clip-vit-base-patch32 (MIT) as exported by Xenova/clip-vit-base-patch32 (MIT), pinned
+# to a commit and checked by SHA-256 (the same pin as purffle_shorts/clip_local.py). The label embeddings ship
+# in the package (clip_labels.json), so the text tower is not needed at run time.
+ARG CLIP_REV=6b7c523703ae26e39be4b03774966f8571c7f523
+ENV CLIP_DIR=/opt/clip
+RUN python - <<'EOF'
+import hashlib, os, urllib.request
+url = f"https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/{os.environ['CLIP_REV']}/onnx/vision_model.onnx"
+want = "fd6e1402a588279d1723c7534d4bcba5bc0b14b47dfab0e46f8c47b8270d7d40"
+os.makedirs("/opt/clip", exist_ok=True)
+h = hashlib.sha256()
+with urllib.request.urlopen(url, timeout=900) as r, open("/opt/clip/vision_model.onnx", "wb") as f:
+    while chunk := r.read(1 << 20):
+        h.update(chunk)
+        f.write(chunk)
+if h.hexdigest() != want:
+    raise SystemExit(f"clip vision_model.onnx: sha256 {h.hexdigest()} != pinned {want}")
+print("clip model ok")
+EOF
 COPY pyproject.toml README.md LICENSE ./
 COPY purffle_shorts ./purffle_shorts
 RUN pip install --no-cache-dir --no-deps .

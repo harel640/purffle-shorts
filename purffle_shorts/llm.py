@@ -78,7 +78,10 @@ class LLMError(RuntimeError):
 # spend its timeout and retries on it before falling back to Groq - the 19:00 runs spent 20+ minutes in the
 # script stages and hit the 25-minute watchdog. After CIRCUIT_AFTER consecutive transient failures a provider
 # is skipped for the rest of the run (still tried as a last resort if every other provider fails).
-CIRCUIT_PROVIDERS = {"gemini"}
+# Vision has circuits of its own (Nov 22: a Gemini TEXT timeout opened the "gemini" circuit and that also
+# switched Gemini VISION off for the run, while Cloudflare's allocation was used up - no backend was left).
+GEMINI_VISION, CF_VISION = "gemini-vision", "cloudflare-vision"
+CIRCUIT_PROVIDERS = {"gemini", GEMINI_VISION, CF_VISION}
 CIRCUIT_AFTER = 2
 GEMINI_TIMEOUT = float(os.getenv("GEMINI_TIMEOUT", "30"))     # per call, seconds (was 180)
 _TRANSIENT_RE = re.compile(r"(?i)(http (429|5\d\d)|timed out|timeout|connection (aborted|reset|error)|"
@@ -99,6 +102,37 @@ VISION_MAX_SIDE = 1024
 # Cloudflare Workers AI vision: Mistral Small 3.1 24B (Apache-2.0, chat-completions format, no licence prompt).
 # @cf/llava-hf/llava-1.5-7b-hf was deprecated on 2026-11-20 (HTTP 410). Tried on real photos on Nov 20: 4/4 right.
 CF_VISION_MODEL = "@cf/mistralai/mistral-small-3.1-24b-instruct"
+# Its price (developers.cloudflare.com/workers-ai/platform/pricing, Nov 2026): 31,876 neurons per million input
+# tokens, 50,488 per million output tokens. The free allocation is 10,000 neurons a day; the docs say it resets
+# at 00:00 UTC. A picture costs roughly one token per 28x28 pixels, so the picture sent to Cloudflare is capped
+# at 640 px (the size the Nov 21 calibration was measured at): ~520 image tokens, ~20 neurons a call.
+CF_NEURONS_PER_INPUT_TOKEN = 31876 / 1e6
+CF_NEURONS_PER_OUTPUT_TOKEN = 50488 / 1e6
+CF_VISION_MAX_SIDE = 640
+CF_PROMPT_TOKENS = 250                # the question and the chat template, for the estimate before a call
+_CF_EXHAUSTED_RE = re.compile(r"(?i)daily free allocation|\b4006\b|neurons, please upgrade")
+
+
+def cf_vision_neurons(jpeg: bytes, body: dict | None = None) -> float:
+    """Neurons one Cloudflare vision call costs: from the reply's token ``usage`` when it has one, else
+    estimated from the picture's size (one token per 28x28 pixels) plus the question."""
+    usage = ((body or {}).get("result") or {}).get("usage") or (body or {}).get("usage") or {}
+    try:
+        p, c = int(usage.get("prompt_tokens") or 0), int(usage.get("completion_tokens") or 0)
+    except (TypeError, ValueError, AttributeError):
+        p = c = 0
+    if p:
+        return p * CF_NEURONS_PER_INPUT_TOKEN + c * CF_NEURONS_PER_OUTPUT_TOKEN
+    import io
+    import math
+    try:
+        from PIL import Image
+        with Image.open(io.BytesIO(jpeg)) as im:
+            w, h = im.size
+    except Exception:  # noqa: BLE001 - an estimate only
+        w = h = CF_VISION_MAX_SIDE
+    tokens = math.ceil(w / 28) * math.ceil(h / 28) + CF_PROMPT_TOKENS
+    return tokens * CF_NEURONS_PER_INPUT_TOKEN + 2 * CF_NEURONS_PER_OUTPUT_TOKEN
 
 
 def _cf_chat_text(body: dict) -> str:
@@ -114,7 +148,7 @@ _IMAGE_ERROR_RE = re.compile(r"(?i)(unsupported[^.]{0,30}(image|format)|could no
                              r"invalid image|not a valid image|image format|cannot identify)")
 
 
-def vision_jpeg(image_path) -> bytes:
+def vision_jpeg(image_path, max_side: int = VISION_MAX_SIDE) -> bytes:
     """``image_path`` as a plain baseline JPEG (RGB, long side <= VISION_MAX_SIDE) for a vision model.
     Commons photos can be MPO (multi-picture) or have odd colour modes, which vision backends reject
     ("Unsupported input image format 'MPO'"); this also shrinks a 3 MB photo to ~100 KB so the call is fast.
@@ -125,9 +159,9 @@ def vision_jpeg(image_path) -> bytes:
         from PIL import Image, ImageOps
         with Image.open(image_path) as im:
             im = ImageOps.exif_transpose(im)
-            im.draft("RGB", (VISION_MAX_SIDE * 2, VISION_MAX_SIDE * 2))
+            im.draft("RGB", (max_side * 2, max_side * 2))
             im = im.convert("RGB")
-            im.thumbnail((VISION_MAX_SIDE, VISION_MAX_SIDE))
+            im.thumbnail((max_side, max_side))
             buf = io.BytesIO()
             im.save(buf, "JPEG", quality=85)
             return buf.getvalue()
@@ -677,7 +711,7 @@ class LLM:
         question = self._vision_question(subject)
         image_error: Exception | None = None
 
-        gem = self._gemini_vision_model() if not self.circuit_open("gemini") else None
+        gem = self._gemini_vision_model() if not self.circuit_open(GEMINI_VISION) else None
         if gem:
             key, model = gem
             uri = f"data:{mime};base64,{base64.b64encode(raw).decode()}"
@@ -691,36 +725,65 @@ class LLM:
                                 headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"})
                 raise_for_status(r, "Gemini vision")
                 v = self._yes_no(r.json()["choices"][0]["message"]["content"])
-                self.note_success("gemini")
+                self.note_success(GEMINI_VISION)
                 if v is not None:
                     return v
             except Exception as e:
                 self._warn_vision_failure("gemini", model, e)
-                self.note_failure("gemini", e)
+                self.note_failure(GEMINI_VISION, e)
                 if isinstance(e, PermanentError) and _IMAGE_ERROR_RE.search(str(e)):
                     image_error = e
 
         acct, tok = self.settings.cloudflare_account_id, self.settings.cloudflare_api_token
-        if acct and tok:
+        if acct and tok and not self.circuit_open(CF_VISION):
             model = (self.settings.cloudflare_vision_model or CF_VISION_MODEL).strip()
             url = f"https://api.cloudflare.com/client/v4/accounts/{acct}/ai/run/{model}"
-            uri = f"data:{mime};base64,{base64.b64encode(raw).decode()}"
+            small = vision_jpeg(image_path, CF_VISION_MAX_SIDE)
+            budget = getattr(self, "neurons", None)            # media.NeuronBudget, set by the pipeline
+            est = cf_vision_neurons(small)
+            if budget is not None and not budget.can_spend(est, "vision"):
+                self._cf_vision_off(f"today's neuron budget is used up ({budget.spent_today():.0f} of "
+                                    f"{budget.daily})")
+                return self._vision_none(image_error)
+            uri = f"data:{mime};base64,{base64.b64encode(small).decode()}"
             try:
                 r = http().post(url, json={"messages": [{"role": "user", "content": [
                                     {"type": "text", "text": question},
                                     {"type": "image_url", "image_url": {"url": uri}}]}], "max_tokens": 8},
                                 headers={"Authorization": f"Bearer {tok}"}, timeout=90)
                 raise_for_status(r, "Cloudflare vision")
-                v = self._yes_no(_cf_chat_text(r.json()))
+                body = r.json()
+                if budget is not None:
+                    budget.record(cf_vision_neurons(small, body), "vision")
+                self.note_success(CF_VISION)
+                v = self._yes_no(_cf_chat_text(body))
                 if v is not None:
                     return v
             except Exception as e:
-                self._warn_vision_failure("cloudflare", model, e)
+                if _CF_EXHAUSTED_RE.search(str(e)):
+                    # The account's daily allocation is gone: every further call this run would fail the same
+                    # way (3 tries per image). Stop asking; the local check takes over (media.verify_subject).
+                    if budget is not None:
+                        budget.note_exhausted()
+                    self._cf_vision_off("Cloudflare says the daily free allocation of neurons is used up")
+                else:
+                    self._warn_vision_failure("cloudflare", model, e)
+                    self.note_failure(CF_VISION, e)
                 if isinstance(e, PermanentError) and _IMAGE_ERROR_RE.search(str(e)):
                     image_error = e
+        return self._vision_none(image_error)
+
+    @staticmethod
+    def _vision_none(image_error: Exception | None) -> None:
         if image_error is not None:
             raise ImageUnusable(f"vision backend refused the image: {redact(image_error)}")
         return None
+
+    def _cf_vision_off(self, why: str) -> None:
+        """Open the Cloudflare vision circuit for the rest of the run, saying why once."""
+        if not self.circuit_open(CF_VISION):
+            self.__dict__.setdefault("_cb_open", set()).add(CF_VISION)
+            log.warning("Cloudflare vision off for the rest of this run: %s", why)
 
     def _reselect_on_model_gone(self, provider: Provider, error: Exception) -> Provider | None:
         """If ``error`` means the model is gone, rebuild the provider on the next newest model
