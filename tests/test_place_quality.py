@@ -236,11 +236,11 @@ def test_no_look_means_no_ai_image_and_the_prompt_carries_the_clothing(monkeypat
     assert seen["p"].startswith("Tibetan Buddhist monastery") and "maroon robes" in seen["p"]
 
 
-# ---------------------------------------------------------------- 5. no image for >2 scenes in a row
-def test_no_image_repeats_more_than_twice_in_a_row(monkeypatch, tmp_path):
+# ---------------------------------------------------------------- 5. no image repeats within a video (Nov 23)
+def test_no_image_repeats_within_a_video(monkeypatch, tmp_path):
     s = Settings(visual_sources=["wikimedia"])               # no stock-video fallback in the test
     v = Visuals(s)
-    pool = [_wimg("a", "Pulga ridge"), _wimg("b", "Pulga river")]   # only two photos, five scenes
+    pool = [_wimg(c, f"Pulga view {c}") for c in "abcde"]
     monkeypatch.setattr(M, "geosearch_images", lambda *a, **k: list(pool))
     monkeypatch.setattr(v, "_wiki_search", lambda q: [])
     monkeypatch.setattr(v, "_fetch", lambda item, d, i: (setattr(item, "path", d / f"s{i}.jpg") or item))
@@ -248,8 +248,62 @@ def test_no_image_repeats_more_than_twice_in_a_row(monkeypatch, tmp_path):
     jobs = [("Pulga", "", False)] * 5
     keys = [m.key for m in v.for_place_scenes(jobs, "Pulga", "India", tmp_path / "m",
                                               min_images=2, lat=32.0, lon=77.3)]
-    assert len(keys) == 5
-    assert all(not (keys[i] == keys[i + 1] == keys[i + 2]) for i in range(len(keys) - 2)), keys
+    assert len(keys) == 5 and len(set(keys)) == 5, keys
+
+
+def test_a_pool_smaller_than_the_scenes_skips_rather_than_repeat_a_photo(monkeypatch, tmp_path):
+    s = Settings(visual_sources=["wikimedia"])
+    v = Visuals(s)
+    pool = [_wimg("a", "Pulga ridge"), _wimg("b", "Pulga river")]   # only two photos, five scenes
+    monkeypatch.setattr(M, "geosearch_images", lambda *a, **k: list(pool))
+    monkeypatch.setattr(v, "_wiki_search", lambda q: [])
+    monkeypatch.setattr(v, "_fetch", lambda item, d, i: (setattr(item, "path", d / f"s{i}.jpg") or item))
+    monkeypatch.setattr(M, "_low_quality_image", lambda p: False)
+    with pytest.raises(M.SkipTopic) as e:
+        v.for_place_scenes([("Pulga", "", False)] * 5, "Pulga", "India", tmp_path / "m",
+                           min_images=2, lat=32.0, lon=77.3)
+    assert e.value.photos is True                            # given back once like any photo skip
+
+
+def _photo(path, seed, size=(320, 240)):
+    """A textured picture: the same ``seed`` gives the same picture, at any size or compression."""
+    import random
+    from PIL import Image, ImageFilter
+    rnd = random.Random(seed)
+    im = Image.new("RGB", (16, 12))
+    im.putdata([(rnd.randrange(256), rnd.randrange(256), rnd.randrange(256)) for _ in range(16 * 12)])
+    im.resize(size, Image.BICUBIC).filter(ImageFilter.GaussianBlur(2)).save(path, quality=90)
+    return path
+
+
+def test_the_same_photo_under_another_name_is_not_shown_twice(monkeypatch, tmp_path):
+    """Nov 22, Kellie's Castle: two Commons files that are one photo (other name, size, compression)."""
+    seeds = {"a": 1, "dup": 1, "b": 2, "c": 3, "d": 4}
+    sizes = {"dup": (640, 480)}
+    s = Settings(visual_sources=["wikimedia"])
+    v = Visuals(s)
+    pool = [_wimg(k, f"Kellie view {k}") for k in ("a", "dup", "b", "c", "d")]
+
+    def fetch(item, d, i):
+        d.mkdir(parents=True, exist_ok=True)
+        item.path = _photo(d / f"{item.id}.jpg", seeds[item.id], sizes.get(item.id, (320, 240)))
+        return item
+
+    monkeypatch.setattr(M, "geosearch_images", lambda *a, **k: list(pool))
+    monkeypatch.setattr(v, "_wiki_search", lambda q: [])
+    monkeypatch.setattr(v, "_fetch", fetch)
+    jobs = [("Kellie", "", False)] * 4
+    out = v.for_place_scenes(jobs, "Kellie", "Malaysia", tmp_path / "m", min_images=2, lat=4.4, lon=101.0)
+    hashes = [M.image_hash(m.path) for m in out]
+    assert len(set(hashes)) == 4 and not ({"a", "dup"} <= {m.id for m in out}), [m.id for m in out]
+
+
+def test_image_hash_tells_a_recompressed_copy_from_a_different_picture(tmp_path):
+    a, b = _photo(tmp_path / "a.jpg", 1), _photo(tmp_path / "b.jpg", 2)
+    a_small = _photo(tmp_path / "a2.jpg", 1, (160, 120))
+    assert (M.image_hash(a) ^ M.image_hash(a_small)).bit_count() <= M.DUPLICATE_BITS
+    assert (M.image_hash(a) ^ M.image_hash(b)).bit_count() > M.DUPLICATE_BITS
+    assert M.image_hash(tmp_path / "missing.mp4") is None
 
 
 # ---------------------------------------------------------------- the present-day "place" story style
@@ -357,6 +411,7 @@ def test_opening_scene_is_the_strongest_landmark_photo_not_generic(monkeypatch, 
         _wimg("g1", "grass field and trees Gokarna"),               # generic -> never the opener
         _wimg("t1", "Mahabaleshwar Temple Gokarna", w=1600, h=2000),  # the landmark, hi-res portrait
         _wimg("b1", "Gokarna beach"),
+        _wimg("s1", "Gokarna sea view"), _wimg("s2", "Gokarna shore at dusk"),
     ]
     monkeypatch.setattr(M, "geosearch_images", lambda *a, **k: list(pool))
     monkeypatch.setattr(v, "_wiki_search", lambda q: [])
@@ -468,7 +523,8 @@ def test_landmark_opener_excludes_animal_and_people_titles(monkeypatch, tmp_path
     # No vision available (llm=None): the opener still refuses a monkey/tourist photo for the landmark.
     v = Visuals(Settings(visual_sources=["wikimedia"]), llm=None)
     pool = [_wimg("m1", "Monkey at Gokarna temple", w=2000, h=1500),   # animal main subject -> never the opener
-            _wimg("t1", "Gokarna Mahabaleshwar temple tower", w=1600, h=1200)]
+            _wimg("t1", "Gokarna Mahabaleshwar temple tower", w=1600, h=1200),
+            _wimg("t2", "Gokarna temple steps"), _wimg("t3", "Gokarna temple courtyard")]
     monkeypatch.setattr(M, "geosearch_images", lambda *a, **k: list(pool))
     monkeypatch.setattr(v, "_wiki_search", lambda q: [])
     monkeypatch.setattr(v, "_fetch", lambda item, d, i: (setattr(item, "path", d / f"{item.id}.jpg") or item))

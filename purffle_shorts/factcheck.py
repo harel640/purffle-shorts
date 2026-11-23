@@ -566,9 +566,13 @@ def _judge(item: dict, reply: dict | None, source_norm: str, source_digits: str,
 HEADLINE_CANDIDATES = 4          # titles and on-screen hooks written when the writer's own is not supported
 _HEADLINE_LISTS = {"title": "titles", "hook": "hooks", "opening": "openings"}
 _HEADLINE_RULES = (
-    "Each is a CURIOSITY QUESTION or a SURPRISING CONTRAST with human stakes (people, and what they survived, "
-    "lost, risked or uncovered). NO years or dates in a title or a hook. Never \"PLACE: fact\"; the place's name "
-    "may appear naturally. Never vague mystery words (mystery, secret, hidden, legend, forgotten, untold). "
+    "Each may be a QUESTION or a STATEMENT. Make it about the most concrete DRAMATIC EVENT the quotes tell (a "
+    "disaster, war, siege, betrayal, rescue, disappearance, curse) or about a specific NAMED PERSON, with human "
+    "stakes (what people survived, lost, risked or uncovered); a statement states the event itself, like \"A 7.2 "
+    "magnitude earthquake struck Bohol\". Never a generic subject (\"a monarch\", \"a jungle castle\"), never a "
+    "heritage designation (UNESCO, World Heritage), \"still stands\" or a founding fact. NO years or dates in a "
+    "title or a hook. Never \"PLACE: fact\"; the place's name may appear naturally. Never vague mystery words "
+    "(mystery, secret, hidden, legend, forgotten, untold). "
     "Whatever a question takes for granted must be STATED by the quotes: do NOT add any fact, cause, motive, "
     "number, name or event that is not in them.")
 
@@ -596,18 +600,19 @@ def _headline_options(llm, script, quotes: list[str], which: list[str], title_le
 
 
 def _best_row(rows: list[dict], fit: int = 0) -> dict | None:
-    """The supported narration sentence a safe headline is built on: the one with the most human stakes (who
-    survived, lost, built or uncovered what), never a birth/founding/administrative fact, then the closest
-    to its quote. ``fit``: prefer a sentence that is at most that long once its years are out (a title)."""
-    from .script import _DRY_RE, _STAKES_RE           # script does not import factcheck: no cycle
+    """The supported narration sentence a safe headline is built on: the most DRAMATIC one (a disaster, war,
+    betrayal, rescue or disappearance, or a named person - script.headline_score), never a heritage
+    designation, "still stands", or a birth/founding/administrative fact, then the closest to its quote.
+    ``fit``: prefer a sentence that is at most that long once its years are out (a title)."""
+    from .script import DESIGNATION_RE, _DRY_RE, headline_score    # script does not import factcheck: no cycle
     ok = [r for r in rows if r["kind"] == "narration" and r["verdict"] == "supported" and r.get("quote")
-          and not r["text"].rstrip().endswith("?")]
+          and not r["text"].rstrip().endswith("?")
+          and not DESIGNATION_RE.search(r["text"]) and not _DRY_RE.search(r["text"])]   # never a designation
     if not ok:
         return None
     if fit:
         ok = [r for r in ok if len(_strip_years(r["text"]).rstrip(".")) <= fit] or ok
-    return max(ok, key=lambda r: (not _DRY_RE.search(r["text"]), len(_STAKES_RE.findall(r["text"])),
-                                  r.get("overlap") or 0.0))
+    return max(ok, key=lambda r: (headline_score(r["text"]), r.get("overlap") or 0.0))
 
 
 def _strip_years(text: str) -> str:
@@ -749,7 +754,7 @@ def verify_claims(llm, script, source_text: str, *, place_words: str = "",
     which = [k for k in ("title", "hook") if any(r["verdict"] == "unsupported" for r in by_kind[k])]
     asked = which + (["opening"] if opening_bad and "narration" in kinds and first_scene is not None else [])
     if asked:
-        from .script import vague_hook_reason
+        from .script import headline_score, vague_hook_reason
         quotes = list(dict.fromkeys(r["quote"] for r in rows if r["verdict"] == "supported" and r["quote"]))
         role = {"title": "TITLE", "hook": "HOOK", "opening": "OPENING"}
         rule_kind = {"title": "title", "hook": "hook_text", "opening": "opening"}
@@ -779,9 +784,11 @@ def verify_claims(llm, script, source_text: str, *, place_words: str = "",
                 if k in chosen:
                     continue
                 good = [r for r in judged if r["part"] == k and r["verdict"] != "unsupported"]
-                best = next((r for r in good if not vague_hook_reason(r["text"], rule_kind[k])), None)
+                meets = [r for r in good if not vague_hook_reason(r["text"], rule_kind[k])]
+                # the strongest supported candidate: a dramatic event or a named person over a generic noun
+                best = max(meets, key=lambda r: headline_score(r["text"])) if meets else None
                 if best is None and good:
-                    best = good[0]
+                    best = max(good, key=lambda r: headline_score(r["text"]))
                 if best is not None:
                     chosen[k] = best
 
