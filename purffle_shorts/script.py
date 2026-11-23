@@ -668,7 +668,12 @@ def _resize_story(llm, script: Script, subject: str, lo_words: int, hi_words: in
 # surprising contrast about people - who survived, lost, risked or uncovered what - with no years and no
 # "PLACE: fact" label. Everything they take for granted is still checked against the article (factcheck).
 STAKES_RULE = (
-    "  It must be a CURIOSITY QUESTION or a SURPRISING CONTRAST with HUMAN STAKES taken from the background: "
+    "  It may be a QUESTION or a STATEMENT. Lead with the most concrete DRAMATIC EVENT in the background (a "
+    "disaster, war, siege, betrayal, rescue, disappearance, curse) or a specific NAMED PERSON, never a generic "
+    "noun (\"a monarch\", \"a jungle castle\"); a statement is the event itself (\"A 7.2 magnitude earthquake "
+    "struck Bohol\"). Never a heritage designation (UNESCO, World Heritage), \"still stands\" or a founding "
+    "fact. It must be a CURIOSITY QUESTION, a SURPRISING CONTRAST or such an event, with HUMAN STAKES taken "
+    "from the background: "
     "people, and what they survived, lost, risked, hid or uncovered (e.g. \"How did one of history's richest "
     "cities vanish in months?\", \"How did one villager's roof survive massive snow?\", \"Why did a whole "
     "city build its houses on water?\"). NO years or dates in it (no \"1572\", no \"7th-century\"). Never the "
@@ -700,6 +705,57 @@ _DRY_RE = re.compile(r"\b(was born|born|founded|founding|established|became (?:t
                      r"municipality|seat)|administrative|incorporated|gazetted|declared a)\b", re.I)
 
 
+# Week 3 analytics: the best title was a concrete dramatic EVENT stated outright ("A 7.2 magnitude earthquake
+# struck Bohol": 401 views, 69% stayed); the worst were dull fallbacks ("UNESCO declared the ruins a World
+# Heritage Site": 59, "Gurjari Mahal still stands": 50); vague subjects ("a monarch", "a jungle castle") sat
+# mid-pack. So a title may be a question OR a statement, candidates are ranked by a dramatic event or a named
+# person, and a designation, "still stands" or a founding fact is never a headline.
+_EVENT_RE = re.compile(
+    r"\b(earthquakes?|quakes?|tsunamis?|floods?|flooded|fires?|burn(?:ed|t|ing)?|eruptions?|erupted|storms?|"
+    r"typhoons?|cyclones?|famine|plague|epidemic|collaps\w*|destroy\w*|devastat\w*|struck|"
+    r"wars?|battles?|sieges?|besieg\w*|invad\w*|invasions?|attack\w*|raid\w*|sack(?:ed|ing)?|conquer\w*|"
+    r"massacres?|slaughter\w*|assassinat\w*|murder\w*|executed|beheaded|"
+    r"betray\w*|treachery|treason|rebel\w*|revolts?|uprising|mutin\w*|coup|"
+    r"rescu\w*|surviv\w*|escap\w*|fled|flee\w*|smuggl\w*|stol\w*|"
+    r"disappear\w*|vanish\w*|abandon\w*|buried|swallowed|drown\w*|"
+    r"curses?|cursed|haunt\w*|exiled|imprison\w*|trapped|ambush\w*|poison\w*|"
+    r"loses|lost|died|death)\b", re.I)
+# A specific named person: two capitalised words in a row ("Kellie-Smith" counts as one), not after a full stop.
+_NAMED_PERSON_RE = re.compile(
+    r"(?<![.!?]\s)(?<!^)\b(?:(?:King|Queen|Emperor|Sultan|Rajah|Raja|Maharaja|Prince|Princess|General|Admiral|"
+    r"Captain|Sir|Lord|Lady|Saint|St\.?|Dr\.?)\s+[A-Z][\w'’-]+(?:\s+[A-Z][\w'’-]+)?|"
+    r"[A-Z][a-z]+[\w'’-]*\s+(?:de |van |von |bin |ibn |al-)?[A-Z][a-z]+[\w'’-]*)\b")
+_GENERIC_SUBJECT_RE = re.compile(
+    r"\b(?:an?|the|one)\s+(?:monarch|king|ruler|noble|man|woman|jungle castle|castle|temple|ruins?|"
+    r"old (?:fort|castle|temple)|ancient (?:city|temple|fort)|local|villager)\b", re.I)
+# Never a headline: a heritage designation, "still stands", or a founding fact.
+DESIGNATION_RE = re.compile(
+    r"\b(?:unesco|world heritage|heritage (?:site|list|status|listing)|heritage[- ]listed|national (?:monument|"
+    r"heritage|treasure)|declared (?:a |an |the )?(?:[\w-]+ ){0,4}(?:site|monument|heritage)|inscribed|"
+    r"listed as|still (?:stands?|standing|survives?|remains?|exists?)|stands? (?:today|to this day|still)|"
+    r"survives? today|today(?:,)? (?:it )?(?:stands|remains|is)|was (?:founded|established|built|constructed|"
+    r"erected|completed)|were (?:founded|established|built|constructed)|founded (?:by|in)|established (?:by|in)|"
+    r"built (?:by|in|for)|construction (?:began|started)|began construction|its founding|the founding)\b", re.I)
+
+
+def headline_score(text: str) -> float:
+    """How strong a headline is, for ranking candidates: a concrete dramatic event (disaster, war, betrayal,
+    rescue, disappearance) first, a specific named person second, human stakes third; generic subjects ("a
+    monarch", "a jungle castle") and dry or designation facts count against it."""
+    text = (text or "").strip()
+    score = 3.0 * min(2, len(_EVENT_RE.findall(text)))
+    if _NAMED_PERSON_RE.search(text):
+        score += 2.5
+    score += 0.5 * min(3, len(_STAKES_RE.findall(text)))
+    if re.search(r"\d", text):
+        score += 0.5                                        # a concrete figure ("7.2 magnitude", "70 craftsmen")
+    if _GENERIC_SUBJECT_RE.search(text):
+        score -= 1.5
+    if _DRY_RE.search(text) or DESIGNATION_RE.search(text):
+        score -= 6.0
+    return score
+
+
 def vague_hook_reason(text: str, kind: str = "title") -> str:
     """Why a title, on-screen hook or spoken opening falls short of a curiosity headline, or "".
     ``kind``: "title" | "hook_text" | "opening" - years and the "PLACE: fact" label are banned from the title
@@ -719,9 +775,14 @@ def vague_hook_reason(text: str, kind: str = "title") -> str:
     d = _DRY_RE.search(text)
     if d:
         return f"a birth, founding or administrative fact ({d.group(0)!r}) is not a story"
-    if not (text.rstrip().endswith("?") or _CONTRAST_RE.search(text)):
-        return "not a curiosity question or a contrast"
-    if not _STAKES_RE.search(text):
+    if kind in ("title", "hook_text"):
+        d = DESIGNATION_RE.search(text)
+        if d:
+            return f"a designation, \"still stands\" or founding fact ({d.group(0)!r}) is not a story"
+    if not (text.rstrip().endswith("?") or _CONTRAST_RE.search(text)
+            or _EVENT_RE.search(text) or _NAMED_PERSON_RE.search(text)):      # a dramatic STATEMENT is fine
+        return "not a curiosity question, a contrast or a dramatic event"
+    if not (_STAKES_RE.search(text) or _EVENT_RE.search(text)):
         return "no human stakes (who survived, lost, risked or uncovered what)"
     return ""
 

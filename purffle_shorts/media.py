@@ -895,6 +895,27 @@ def _low_quality_image(path: Path, min_std: float = 16.0) -> bool:
         return False
 
 
+DUPLICATE_BITS = 8        # two photos whose 64-bit difference hashes differ in at most this many bits are one picture
+
+
+def image_hash(path) -> int | None:
+    """A 64-bit difference hash of the picture (9x8 greyscale, each pixel against its right neighbour): the same
+    photo re-uploaded under another Commons name, at another size or recompressed, hashes (almost) the same.
+    None when the file is not an image (a video) or can't be read."""
+    try:
+        from PIL import Image, ImageOps
+        with Image.open(path) as im:
+            g = ImageOps.exif_transpose(im).convert("L").resize((9, 8), Image.LANCZOS)
+        px = g.tobytes()
+        bits = 0
+        for row in range(8):
+            for col in range(8):
+                bits = (bits << 1) | (px[row * 9 + col] > px[row * 9 + col + 1])
+        return bits
+    except Exception:  # noqa: BLE001
+        return None
+
+
 class Visuals:
     def __init__(self, settings: Settings, used_keys: set[str] | None = None, llm=None, budget=None):
         self.s = settings
@@ -906,6 +927,8 @@ class Visuals:
         self._local_vision_said = False               # the switch to the local CLIP check was logged
         self._vision_streak = 0                       # consecutive images no backend answered for
         self._reuse_rejected: set[str] = set()        # pool photos the last-resort picker already turned down
+        self._shown_keys: set[str] = set()            # photos already in THIS video (no picture repeats in a video)
+        self._shown_hashes: list[int] = []
         self._look_cache: dict = {}                   # (place, country, article) -> {architecture, clothing}
         self.used = set(used_keys or ())
         self.lock = threading.Lock()
@@ -989,6 +1012,25 @@ class Visuals:
                 best = max(fresh, key=lambda c: _score(c, need, self.s.orientation, query))
             self.used.add(best.key)
             return best
+
+    def _repeats_a_shown_photo(self, item: MediaItem) -> bool:
+        """True when ``item`` is a picture this video already shows: the same file, or the same photo under
+        another Commons name (Nov 22: the Kellie's Castle video showed one photo twice)."""
+        with self.lock:
+            if item.key in self._shown_keys:
+                return True
+            h = image_hash(item.path) if item.path else None
+            dup = h is not None and any((h ^ x).bit_count() <= DUPLICATE_BITS for x in self._shown_hashes)
+        if dup:
+            log.info("Skipping %s: the same picture is already in this video", item.extra.get("wiki_title") or item.key)
+        return dup
+
+    def _remember_shown(self, item: MediaItem) -> None:
+        with self.lock:
+            self._shown_keys.add(item.key)
+            h = image_hash(item.path) if item.path else None
+            if h is not None:
+                self._shown_hashes.append(h)
 
     def _fetch(self, item: MediaItem, dest_dir: Path, idx: int) -> MediaItem:
         if item.source == "local":
@@ -1195,6 +1237,8 @@ class Visuals:
             if _low_quality_image(item.path):
                 log.info("Scene %d: skipping near-blank/low-contrast image %s", idx + 1, item.key)
                 continue
+            if self._repeats_a_shown_photo(item):
+                continue
             verdict = self.verify_subject(item, subject)
             if verdict is False or verdict == NO_ANSWER:
                 if self._vision_unavailable:
@@ -1360,6 +1404,8 @@ class Visuals:
                 continue
             if _low_quality_image(item.path):
                 continue
+            if self._repeats_a_shown_photo(item):
+                continue
             verdict = self.verify_subject(item, subject)
             if verdict is False or verdict == NO_ANSWER:       # not the landmark, or unverified -> next
                 if self._vision_unavailable:
@@ -1455,6 +1501,7 @@ class Visuals:
                                     photos=True)
             consec = consec + 1 if item.key == prev_key else 1
             prev_key = item.key
+            self._remember_shown(item)
             if item.source == "wikimedia":                     # remember its subject so later scenes differ
                 chosen |= (_terms(item.text) - script_terms)
                 if _STATUE_RE.search(item.text):
@@ -1476,6 +1523,7 @@ class Visuals:
         for _ in range(tries):
             with self.lock:
                 cands = [c for c in pool if c.key != exclude and c.key not in self._reuse_rejected
+                         and c.key not in self._shown_keys           # never a picture this video already shows
                          and not (no_statues and _STATUE_RE.search(c.text))]
                 unused = [c for c in cands if c.key not in self.used]
                 pick_from = unused or cands
@@ -1491,6 +1539,9 @@ class Visuals:
                 self._reuse_rejected.add(best.key)
                 continue
             if _low_quality_image(item.path):
+                self._reuse_rejected.add(best.key)
+                continue
+            if self._repeats_a_shown_photo(item):
                 self._reuse_rejected.add(best.key)
                 continue
             verdict = self.verify_subject(item, subject or query)

@@ -62,7 +62,8 @@ def test_four_candidates_are_checked_together_and_the_first_supported_rule_passi
         hooks=["Flood or fire?", "An earthquake destroyed the city", "Who guarded the gold?", "Gone"])])
     s, report = F.verify_claims(llm, _script(), SOURCE, place_words="Nisa")
     assert s.title == "What destroyed the Parthian city?"           # candidate 2: the first supported one
-    assert s.hook_text == "Who guarded the gold?"                    # the supported hook before it is no question
+    # a dramatic STATEMENT is a headline too, and the event outranks the question (week-3 analytics)
+    assert s.hook_text == "An earthquake destroyed the city"
     assert len(llm.headline_prompts) == 1
     assert "4 DIFFERENT titles" in llm.headline_prompts[0] and "4 DIFFERENT on-screen hooks" in llm.headline_prompts[0]
     assert len(llm.batches[1]) == 8                                  # all 8 candidates judged in ONE batch
